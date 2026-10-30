@@ -17,3 +17,9 @@
 .DS_Store
 .idea/
 .vscode/
+
+# TypeScript side
+node_modules/
+coverage/
+# Ephemeral sandbox keys and logs written by `make demo` (never commit)
+examples/local_demo/.tmp/

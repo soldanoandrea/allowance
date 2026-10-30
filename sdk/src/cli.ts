@@ -1,0 +1,365 @@
+/**
+ * `allowance` command-line interface.
+ *
+ * The agent key comes from `--key-file <path>` (given explicitly) or the
+ * ALLOWANCE_AGENT_KEY environment variable; owner commands use
+ * `--owner-key-file` or ALLOWANCE_OWNER_KEY. The CLI never writes keys.
+ */
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
+
+import { guardedPay, logPayResult, logSimulation } from './agent/guarded-pay.ts';
+import { AllowanceClient } from './client.ts';
+import { describeAgent, describePolicy, describeRejection, describeStatus, iso } from './describe.ts';
+import { AllowanceError } from './errors.ts';
+import { table } from './format.ts';
+import { requestHash } from './hash.ts';
+import { AGENT_KEY_ENV, OWNER_KEY_ENV, loadKey } from './keys.ts';
+import { OwnerClient } from './owner.ts';
+import type { AgentId, Receipt } from './types.ts';
+import { near, parseAmount } from './units.ts';
+
+export interface CliIo {
+  out: (line: string) => void;
+  err: (line: string) => void;
+  env: Record<string, string | undefined>;
+}
+
+/** Exit codes: 0 ok, 1 error, 2 waiting for human approval, 3 refused / rejected by the policy. */
+export const EXIT = { ok: 0, error: 1, needsApproval: 2, refused: 3 } as const;
+
+const USAGE = `allowance <command> [options]
+
+Agent (signs with the function-call key: --key-file <path> or $${AGENT_KEY_ENV})
+  simulate --payee <account> --amount <NEAR>     free dry-run: allow | needs_approval | block
+  pay      --payee <account> --amount <NEAR> [--memo <text>] [--nonce <n> | --request-hash <b64>]
+           [--force]                             simulate first and refuse on block (--force: sign anyway)
+  confirm  --receipt <id> --passed <true|false>  record whether the purchase was delivered
+  ping                                           how the vault identifies this key
+
+Read-only (no key needed)
+  receipts [--from <id>] [--limit <n>]           receipts table
+  ledger                                         vault, agents and policies, approvals, recent receipts
+  verify   --receipt <id> --payee <account> --amount <NEAR> [--nonce <n>]
+
+Owner / approver (--owner <account>, key: --owner-key-file <path> or $${OWNER_KEY_ENV})
+  approve <pending id>    deny <pending id>    kill
+
+Common options
+  --vault <account>   vault contract account   ($ALLOWANCE_VAULT)
+  --rpc <url>         NEAR JSON-RPC endpoint    ($ALLOWANCE_RPC_URL)
+  --agent <ed25519:pk> simulate for this agent key without holding it
+  --json              machine-readable output
+Amounts are NEAR ("0.02") unless suffixed with "yocto".`;
+
+const OPTIONS = {
+  vault: { type: 'string' },
+  rpc: { type: 'string' },
+  'key-file': { type: 'string' },
+  'owner-key-file': { type: 'string' },
+  owner: { type: 'string' },
+  agent: { type: 'string' },
+  payee: { type: 'string' },
+  amount: { type: 'string' },
+  memo: { type: 'string' },
+  nonce: { type: 'string' },
+  'request-hash': { type: 'string' },
+  receipt: { type: 'string' },
+  passed: { type: 'string' },
+  from: { type: 'string' },
+  limit: { type: 'string' },
+  force: { type: 'boolean', default: false },
+  json: { type: 'boolean', default: false },
+  help: { type: 'boolean', short: 'h', default: false },
+} as const;
+
+type Values = ReturnType<typeof parse>['values'];
+
+function parse(argv: string[]) {
+  return parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
+}
+
+export async function main(argv: string[], io: CliIo): Promise<number> {
+  let parsed: ReturnType<typeof parse>;
+  try {
+    parsed = parse(argv);
+  } catch (err) {
+    io.err(`${(err as Error).message}\n\n${USAGE}`);
+    return EXIT.error;
+  }
+  const { values, positionals } = parsed;
+  const [command, ...rest] = positionals;
+  if (values.help || !command) {
+    io.out(USAGE);
+    return values.help ? EXIT.ok : EXIT.error;
+  }
+  try {
+    switch (command) {
+      case 'simulate':
+        return await simulate(values, io);
+      case 'pay':
+        return await pay(values, io);
+      case 'confirm':
+        return await confirm(values, io);
+      case 'ping':
+        return await ping(values, io);
+      case 'receipts':
+        return await receipts(values, io);
+      case 'ledger':
+        return await ledger(values, io);
+      case 'verify':
+        return await verify(values, io);
+      case 'approve':
+      case 'deny':
+        return await decide(command, rest[0], values, io);
+      case 'kill':
+        return await kill(values, io);
+      default:
+        io.err(`unknown command ${JSON.stringify(command)}\n\n${USAGE}`);
+        return EXIT.error;
+    }
+  } catch (err) {
+    const e = err instanceof AllowanceError ? err : null;
+    io.err(`error${e ? ` [${e.code}]` : ''}: ${(err as Error).message}`);
+    return EXIT.error;
+  }
+}
+
+// ----------------------------------------------------------------------
+// Configuration
+// ----------------------------------------------------------------------
+
+function required(value: string | undefined, what: string): string {
+  if (!value) throw new AllowanceError('config', `missing ${what}`);
+  return value;
+}
+
+function target(values: Values, io: CliIo): { vaultId: string; rpcUrl: string } {
+  return {
+    vaultId: required(values.vault ?? io.env['ALLOWANCE_VAULT'], '--vault (or $ALLOWANCE_VAULT)'),
+    rpcUrl: required(values.rpc ?? io.env['ALLOWANCE_RPC_URL'], '--rpc (or $ALLOWANCE_RPC_URL)'),
+  };
+}
+
+function readClient(values: Values, io: CliIo): AllowanceClient {
+  return new AllowanceClient(target(values, io));
+}
+
+function agentClient(values: Values, io: CliIo): AllowanceClient {
+  const key = loadKey({ keyFile: values['key-file'], envVar: AGENT_KEY_ENV, env: io.env });
+  for (const w of key.warnings) io.err(`warning: ${w}`);
+  return new AllowanceClient({ ...target(values, io), agentKey: key.secretKey });
+}
+
+function ownerClient(values: Values, io: CliIo): OwnerClient {
+  const key = loadKey({ keyFile: values['owner-key-file'], envVar: OWNER_KEY_ENV, env: io.env });
+  for (const w of key.warnings) io.err(`warning: ${w}`);
+  const ownerId = required(values.owner ?? io.env['ALLOWANCE_OWNER'], '--owner (or $ALLOWANCE_OWNER)');
+  return new OwnerClient({ ...target(values, io), ownerId, ownerKey: key.secretKey });
+}
+
+function amountOf(values: Values): bigint {
+  return parseAmount(required(values.amount, '--amount'));
+}
+
+function intOf(value: string | undefined, what: string): number {
+  const text = required(value, what);
+  if (!/^\d+$/.test(text)) throw new AllowanceError('config', `${what} must be a non-negative integer`);
+  return Number(text);
+}
+
+function print(io: CliIo, values: Values, json: unknown, text: () => string): void {
+  io.out(values.json ? JSON.stringify(json, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v), 2) : text());
+}
+
+// ----------------------------------------------------------------------
+// Commands
+// ----------------------------------------------------------------------
+
+async function simulate(values: Values, io: CliIo): Promise<number> {
+  const payee = required(values.payee, '--payee');
+  const amount = amountOf(values);
+  let client: AllowanceClient;
+  let agentId: AgentId | undefined;
+  if (values.agent) {
+    client = readClient(values, io);
+    agentId = { key: values.agent };
+  } else {
+    client = agentClient(values, io);
+  }
+  const sim = await client.simulate(payee, amount, agentId ? { agentId } : {});
+  print(io, values, sim, () => {
+    const lines: string[] = [];
+    logSimulation((l) => lines.push(l), payee, amount, sim);
+    return lines.join('\n');
+  });
+  return sim.verdict === 'block' ? EXIT.refused : sim.verdict === 'needs_approval' ? EXIT.needsApproval : EXIT.ok;
+}
+
+async function pay(values: Values, io: CliIo): Promise<number> {
+  const client = agentClient(values, io);
+  const payee = required(values.payee, '--payee');
+  const amount = amountOf(values);
+  const hash = values['request-hash'] ?? (values.nonce ? requestHash(values.nonce) : undefined);
+  const request = {
+    payee,
+    amount,
+    ...(values.memo !== undefined ? { memo: values.memo } : {}),
+    ...(hash !== undefined ? { requestHash: hash } : {}),
+  };
+  const lines: string[] = [];
+  const log = (l: string): void => {
+    lines.push(l);
+    if (!values.json) io.out(l);
+  };
+  let outcomeJson: unknown;
+  let code: number = EXIT.ok;
+  if (values.force) {
+    log('--force: skipping the simulate guard, the contract decides on-chain');
+    const result = await client.pay(request);
+    logPayResult(log, result);
+    outcomeJson = result;
+    code = exitFor(result.outcome.outcome);
+  } else {
+    const guarded = await guardedPay(client, request, log);
+    if (guarded.status === 'refused') {
+      outcomeJson = { refused: guarded.reason, simulation: guarded.simulation };
+      code = EXIT.refused;
+    } else {
+      outcomeJson = guarded.result;
+      code = exitFor(guarded.result.outcome.outcome);
+    }
+  }
+  if (values.json) print(io, values, outcomeJson, () => '');
+  return code;
+}
+
+function exitFor(outcome: string): number {
+  if (outcome === 'needs_approval') return EXIT.needsApproval;
+  if (outcome === 'rejected') return EXIT.refused;
+  if (outcome === 'paid') return EXIT.ok;
+  return EXIT.error;
+}
+
+async function confirm(values: Values, io: CliIo): Promise<number> {
+  const client = agentClient(values, io);
+  const receiptId = intOf(values.receipt, '--receipt');
+  const passedText = required(values.passed, '--passed');
+  if (passedText !== 'true' && passedText !== 'false') throw new AllowanceError('config', '--passed must be true or false');
+  const tx = await client.confirmDelivery(receiptId, passedText === 'true');
+  print(io, values, tx, () => `confirm_delivery(#${receiptId}, ${passedText}) tx ${tx.txHash}`);
+  return EXIT.ok;
+}
+
+async function ping(values: Values, io: CliIo): Promise<number> {
+  const client = agentClient(values, io);
+  const res = await client.ping();
+  print(io, values, res, () =>
+    `${describeAgent(res.agent)}: ${res.registered ? `registered as "${res.label}"` : 'NOT registered'}, ` +
+    `${res.active ? 'active' : 'inactive'}, vault ${res.paused ? 'PAUSED' : 'running'} (tx ${res.txHash})`,
+  );
+  return EXIT.ok;
+}
+
+function receiptRows(list: Receipt[]): string[][] {
+  return list.map((r) => [
+    `#${r.id}`,
+    r.kind,
+    describeStatus(r.status),
+    describeAgent(r.agent),
+    r.payee,
+    near(r.amount),
+    r.delivered === null ? '' : r.delivered ? 'pass' : 'FAIL',
+    r.memo.length > 40 ? `${r.memo.slice(0, 39)}~` : r.memo,
+  ]);
+}
+
+const RECEIPT_HEADERS = ['id', 'kind', 'status', 'agent', 'payee', 'amount', 'delivered', 'memo'];
+
+async function receipts(values: Values, io: CliIo): Promise<number> {
+  const client = readClient(values, io);
+  const list = await client.receipts({
+    ...(values.from !== undefined ? { fromId: intOf(values.from, '--from') } : {}),
+    ...(values.limit !== undefined ? { limit: intOf(values.limit, '--limit') } : {}),
+  });
+  print(io, values, list, () => (list.length ? table(RECEIPT_HEADERS, receiptRows(list)) : 'no receipts'));
+  return EXIT.ok;
+}
+
+/** file:// URL of the static ledger page for this vault. */
+export function ledgerUrl(rpcUrl: string, vaultId: string): string {
+  const page = join(resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'), 'ledger', 'index.html');
+  const url = pathToFileURL(page);
+  url.searchParams.set('rpc', rpcUrl);
+  url.searchParams.set('vault', vaultId);
+  return url.toString();
+}
+
+async function ledger(values: Values, io: CliIo): Promise<number> {
+  const { vaultId, rpcUrl } = target(values, io);
+  const client = readClient(values, io);
+  const [info, agents, pending] = await Promise.all([client.vault(), client.agents(), client.pending()]);
+  const recent = await client.receipts({ fromId: Math.max(info.first_receipt_id, info.next_receipt_id - 10), limit: 10 });
+  print(io, values, { vault: info, agents, pending, receipts: recent, ledger_url: ledgerUrl(rpcUrl, vaultId) }, () => {
+    const out = [
+      `vault ${vaultId}  owner ${info.owner_id}${info.approver_id ? `  approver ${info.approver_id}` : ''}  ${info.paused ? 'PAUSED' : 'running'}`,
+      `balance ${near(info.balance)}  available ${near(info.available)}  receipts ${info.next_receipt_id}  pending ${info.pending}`,
+      '',
+      `agents (${agents.length})`,
+    ];
+    for (const a of agents) {
+      const remaining = a.remaining_budget === null ? '' : `, ${near(a.remaining_budget)} left in window`;
+      out.push(`  ${describeAgent(a.id)} "${a.label}" ${a.active ? 'active' : 'DISABLED'}, policy v${a.policy_version}, ${a.state.payments} payments${remaining}`);
+      for (const line of describePolicy(a.policy)) out.push(`    - ${line}`);
+    }
+    out.push('', `pending approvals (${pending.length})`);
+    for (const p of pending) {
+      out.push(`  #${p.id} receipt #${p.receipt_id}: ${near(p.amount)} -> ${p.payee} "${p.memo}" (expires ${iso(p.expires_at_ns)})`);
+    }
+    out.push('', 'recent receipts', recent.length ? table(RECEIPT_HEADERS, receiptRows(recent)) : 'no receipts');
+    out.push('', `ledger page: ${ledgerUrl(rpcUrl, vaultId)}`);
+    return out.join('\n');
+  });
+  return EXIT.ok;
+}
+
+async function verify(values: Values, io: CliIo): Promise<number> {
+  const client = readClient(values, io);
+  const receiptId = intOf(values.receipt, '--receipt');
+  const ok = await client.verifyReceipt({
+    receiptId,
+    payee: required(values.payee, '--payee'),
+    minAmount: amountOf(values),
+    ...(values.nonce ? { requestHash: requestHash(values.nonce) } : {}),
+  });
+  print(io, values, { receipt_id: receiptId, verified: ok }, () => `receipt #${receiptId}: ${ok ? 'VERIFIED' : 'not valid for this payee/amount/request'}`);
+  return ok ? EXIT.ok : EXIT.refused;
+}
+
+async function decide(command: 'approve' | 'deny', idText: string | undefined, values: Values, io: CliIo): Promise<number> {
+  const owner = ownerClient(values, io);
+  const pendingId = intOf(idText, `${command} <pending id>`);
+  if (command === 'deny') {
+    const tx = await owner.deny(pendingId);
+    print(io, values, tx, () => `denied approval request #${pendingId} (tx ${tx.txHash})`);
+    return EXIT.ok;
+  }
+  const tx = await owner.approve(pendingId);
+  const o = tx.value;
+  print(io, values, tx, () =>
+    `approve #${pendingId}: ${o.outcome} (receipt #${o.receipt_id})${o.outcome === 'rejected' ? ` - ${describeRejection(o.reason)}` : ''} (tx ${tx.txHash})`,
+  );
+  return o.outcome === 'paid' ? EXIT.ok : EXIT.refused;
+}
+
+async function kill(values: Values, io: CliIo): Promise<number> {
+  const owner = ownerClient(values, io);
+  const tx = await owner.kill();
+  print(io, values, tx, () =>
+    `vault killed: paused, ${tx.value.length} agent key(s) deleted at the protocol level (tx ${tx.txHash})\n` +
+    tx.value.map((a) => `  - ${describeAgent(a)}`).join('\n'),
+  );
+  return EXIT.ok;
+}
+

@@ -1,0 +1,21 @@
+{
+  "name": "@allowance/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-side SDK and CLI for the Allowance vault on NEAR (function-call key, free simulate, receipts)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./sandbox": "./src/sandbox.ts"
+  },
+  "bin": {
+    "allowance": "./bin/allowance.ts"
+  },
+  "dependencies": {
+    "near-api-js": "7.4.0"
+  }
+}

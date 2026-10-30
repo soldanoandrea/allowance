@@ -1,0 +1,20 @@
+{
+  "name": "@allowance/demo-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A tiny paid HTTP API that sells a dataset for NEAR and verifies Allowance vault receipts (HTTP 402 flow)",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@allowance/sdk": "0.1.0"
+  }
+}

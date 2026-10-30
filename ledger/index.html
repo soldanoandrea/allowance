@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Allowance Ledger</title>
+<meta name="description" content="Public ledger of an Allowance vault on NEAR: balance, agents and their on-chain policy, receipts, approvals and events.">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #16181d; --muted: #5d6470; --line: #e3e6eb;
+    --accent: #1f6feb; --ok: #12805c; --ok-bg: #e3f5ec; --bad: #c0362c; --bad-bg: #fbe9e7;
+    --warn: #9a6700; --warn-bg: #fff4d6; --mute-bg: #eef0f3; --bar: #1f6feb;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --ink: #e8eaee; --muted: #9aa3b2; --line: #2a2f39;
+      --accent: #58a6ff; --ok: #3fb984; --ok-bg: #12291f; --bad: #ff7b72; --bad-bg: #331a18;
+      --warn: #e3b341; --warn-bg: #2f2612; --mute-bg: #232832; --bar: #58a6ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); }
+  header { padding: 20px 16px 12px; max-width: 1180px; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; justify-content: space-between; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 10px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 0 16px 40px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .status { color: var(--muted); font-size: 13px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
+  .dot.stale { background: var(--warn); } .dot.err { background: var(--bad); }
+  button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat .label { color: var(--muted); font-size: 12px; }
+  .stat .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .sub { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .agents { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 12px; }
+  .agent { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .agent .title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .agent ul { margin: 8px 0; padding-left: 18px; }
+  .meter { height: 6px; background: var(--mute-bg); border-radius: 3px; overflow: hidden; margin: 6px 0 2px; }
+  .meter > div { height: 100%; background: var(--bar); }
+  .muted { color: var(--muted); }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.wrap { white-space: normal; min-width: 160px; max-width: 320px; overflow-wrap: anywhere; }
+  .small { font-size: 12px; margin-top: 2px; }
+  td.num, th.num { text-align: right; padding-right: 14px; }
+  tr:last-child td { border-bottom: 0; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--mute-bg); color: var(--muted); }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+  .empty { color: var(--muted); padding: 6px 0; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+  code { font-family: var(--mono); font-size: 12px; background: var(--mute-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+  form { display: grid; gap: 10px; max-width: 560px; }
+  input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); width: 100%; }
+  .error { color: var(--bad); }
+  footer { max-width: 1180px; margin: 0 auto; padding: 0 16px 32px; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Allowance ledger <span id="vault-name"></span></h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="status">loading...</span><button id="toggle" type="button">Pause</button></div>
+</header>
+<main id="app"></main>
+<footer id="footer"></footer>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

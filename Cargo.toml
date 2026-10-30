@@ -54,3 +54,9 @@ overflow-checks = true
 [lints.rust.unexpected_cfgs]
 level = "warn"
 check-cfg = ['cfg(near)']
+
+# Local demo helper (`make demo`): hosts a throw-away neard-sandbox for the
+# TypeScript side. Unix only (SIGTERM handling), like the demo itself.
+[[example]]
+name = "sandbox_node"
+path = "examples/local_demo/sandbox_node.rs"

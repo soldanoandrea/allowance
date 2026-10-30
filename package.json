@@ -1,0 +1,27 @@
+{
+  "name": "allowance-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript side of Allowance: agent SDK + CLI, paid demo API, local demo orchestration",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "workspaces": [
+    "sdk",
+    "demo-api"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:e2e": "vitest run sdk/test/e2e.sandbox.test.ts",
+    "demo": "node examples/local_demo/run.ts",
+    "allowance": "node sdk/bin/allowance.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.12"
+  }
+}
