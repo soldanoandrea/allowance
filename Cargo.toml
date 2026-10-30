@@ -1,0 +1,56 @@
+[package]
+name = "allowance"
+description = "Allowance: a sandboxed on-chain treasury for AI agents on NEAR (agents are function-call keys on the vault, policy is enforced by the contract)"
+version = "0.1.0"
+edition = "2024"
+resolver = "3"
+rust-version = "1.95"
+license = "MIT"
+# NEP-0330 contract metadata is implemented automatically by cargo-near.
+repository = "https://github.com/soldanoandrea/allowance"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Reproducible-build descriptor (NEP-330). Not used by the hackathon build path
+# (`cargo near build non-reproducible-wasm`), kept so `cargo near build` can
+# produce a verifiable artifact on a machine with Docker.
+[package.metadata.near.reproducible_build]
+image = "sourcescan/cargo-near:0.21.1-rust-1.96.0"
+image_digest = "sha256:ccb22bb4e677ed022d8b9d1aa1b32f0af52dd0471ef1c32e48dedbf68ee6ee17"
+passed_env = []
+container_build_command = [
+    "cargo",
+    "near",
+    "build",
+    "non-reproducible-wasm",
+    "--locked",
+]
+
+[dependencies]
+near-sdk = "5.30.0"
+
+[dev-dependencies]
+near-sdk = { version = "5.30.0", features = ["unit-testing"] }
+near-sandbox = "0.4.0"
+near-api = "0.8.7"
+cargo-near-build = "0.11.5"
+tokio = { version = "1.12.0", features = ["full"] }
+testresult = "0.4.1"
+reqwest = { version = "0.12", features = ["json"] }
+
+[profile.release]
+codegen-units = 1
+# Optimize for small code size: the wasm is paid for in storage.
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+# Trap on arithmetic overflow instead of wrapping (defense in depth; the code
+# uses checked arithmetic on token amounts anyway).
+overflow-checks = true
+
+# `cfg(near)` is set by near-sdk >= 5.27 when compiling for the chain.
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(near)']

@@ -1,0 +1,6 @@
+[toolchain]
+# near-sdk 5.30 needs rust >= 1.95; any current stable works. We do not pin a
+# patch release so a fresh machine uses the stable toolchain it already has.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

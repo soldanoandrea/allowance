@@ -1,0 +1,19 @@
+# Build output
+/target
+/neardev
+
+# Compiled artifacts outside res/
+*.wasm
+!res/*.wasm
+
+# Local configuration and secrets (never commit keys)
+.env
+.env.*
+!.env.example
+*.key
+*.json.key
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

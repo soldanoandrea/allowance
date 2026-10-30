@@ -1,0 +1,18 @@
+name: Test
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    name: Unit + sandbox tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install cargo-near CLI
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
+      - name: Format check
+        run: cargo fmt --check
+      - name: Run cargo test
+        run: cargo test
