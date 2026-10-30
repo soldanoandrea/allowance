@@ -21,7 +21,7 @@
  */
 import { spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 
@@ -68,7 +68,7 @@ process.on('SIGINT', () => void shutdown().then(() => process.exit(130)));
 /** Run a node script as a separate process, stream its output, keep a copy. */
 function runNode(script: string, args: string[]): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(REPO_ROOT, script), ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [script, ...args], { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
     const relay = (chunk: Buffer, stream: NodeJS.WriteStream): void => {
       output += chunk.toString();
@@ -185,7 +185,8 @@ try {
     ].join('\n'),
   );
 
-  const common = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', keyFile];
+  // Relative to the repo root (the children run there), so logs carry no local paths.
+  const common = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, keyFile)];
   const reader = new AllowanceClient({ vaultId: demo.vaultId, rpcUrl: node.rpcUrl });
   const owner = new OwnerClient({ vaultId: demo.vaultId, ownerId: demo.ownerId, rpcUrl: node.rpcUrl, ownerKey: demo.ownerSecretKey });
 

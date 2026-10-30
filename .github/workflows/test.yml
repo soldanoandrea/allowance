@@ -5,7 +5,7 @@ on:
 
 jobs:
   tests:
-    name: Unit + sandbox tests
+    name: Contract tests + local demo (sandbox)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -16,3 +16,32 @@ jobs:
         run: cargo fmt --check
       - name: Run cargo test
         run: cargo test
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install npm dependencies
+        run: npm ci
+      - name: TypeScript tests incl. the sandbox end-to-end test
+        run: make build sandbox-node && npm test
+      - name: make demo (sandbox, vault, paid API, agent loop, attack)
+        run: make demo
+
+  typescript:
+    name: TypeScript typecheck + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Type-check
+        run: npm run typecheck
+      - name: Unit tests (mocked RPC; the sandbox test skips itself here)
+        run: npm test

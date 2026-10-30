@@ -105,3 +105,69 @@ design says.
 25. The template's deploy/undeploy GitHub workflows were removed (no
     deployment in this milestone); the test workflow is kept and runs
     `cargo test` on Linux.
+
+## TypeScript side (features 5-9)
+
+26. **Node runs the TypeScript directly** (native type stripping, Node 24;
+    22.22+ also works, `near-api-js` 7 needs >= 22.22.2). No bundler, no
+    `dist/`, no `tsx`: `tsc` is used for type-checking only
+    (`erasableSyntaxOnly`, `verbatimModuleSyntax`, strict,
+    `noUncheckedIndexedAccess`). A screener needs `npm ci` and nothing else.
+27. **near-api-js 7.4.0** (current major, single package) rather than
+    `near-kit` or the older `@near-js/*` 2.x packages. The agent signs with
+    `new Account(vaultId, provider, agentKey)`: the key lives on the vault
+    account, so the signer *is* the vault. TypeScript 6.0.3 (the last
+    JavaScript-based compiler; 7.x ships a native binary), vitest 4.1.12,
+    `@types/node` 24. All pinned exactly; one npm workspace (`sdk`,
+    `demo-api`) with a single lockfile.
+28. **The demo API is plain `node:http`** (no Hono/Express): one file, zero
+    dependencies beyond the SDK.
+29. **Payment protocol details** (DESIGN sketched `X-Allowance-Receipt:
+    vault:7`): the retry also carries `X-Allowance-Nonce`, so the server
+    finds its quote and recomputes `request_hash = sha256(utf8(nonce))`
+    itself; nonces and receipts are single-use; a bare receipt id is
+    accepted only with a default vault. See docs/PAYMENT_FLOW.md.
+30. **Vault trust on the payee side**: `verify_receipt` is a view on an
+    account the client names, and any contract can answer `true`. The API
+    therefore trusts vaults by name or by contract code hash; the code hash is
+    read at the block of the `verify_receipt` answer. The local demo uses the
+    code-hash mode ("any vault running this Allowance build").
+31. **Counteroffer semantics**: the scripted planner offers the owner's
+    approval threshold (the most it may pay alone), once; the seller has a
+    floor per product. A planner, scripted or LLM, can only choose pay /
+    counteroffer / refuse; guardrails keep `block` final and the counteroffer
+    below the asking price.
+32. **LLM planner defaults are unverified**: NEAR AI Cloud's base URL
+    (`https://cloud-api.near.ai/v1`) and default model
+    (`deepseek-ai/DeepSeek-V3.1`) come from memory of the quickstart, not
+    from a call made during this milestone (no network beyond npm/crates was
+    allowed). Both are env-overridable, and any failure falls back to the
+    scripted planner. Check them before recording the video.
+33. **`make demo` is orchestrated in TypeScript, the sandbox is hosted by a
+    tiny Rust example** (`examples/local_demo/sandbox_node.rs`, built as the
+    `sandbox_node` example). It reuses the `near-sandbox` crate the tests
+    already depend on (binary download, ports, genesis), prints the RPC URL
+    and stops the node when its stdin closes, so a crashed orchestrator never
+    leaves `neard` behind. DESIGN's `cargo run --example local_demo` became
+    `make demo`, because the agent, the API and the attacker are Node
+    processes.
+34. **The sandbox keeps old blocks** (`gc_num_epochs_to_keep = 100000`): its
+    epochs are 60 blocks and it produces several blocks per second, so with
+    the default (5 epochs) the ledger's event scan lost the demo's events
+    after a few minutes.
+35. **The owner approval in `make demo` is automated**: the orchestrator
+    plays the human and calls `approve` when the request appears (logged as
+    such). The CLI has `approve`/`deny`/`kill` for doing it by hand
+    (`make demo-keep`).
+36. **The ledger page is classic scripts, not ES modules**, because browsers
+    refuse module scripts from `file://`. Its data layer (`core.js`) has no
+    DOM access and is unit-tested in a Node VM; every string is inserted with
+    `textContent` (memos and labels are agent-controlled).
+37. **Events without an indexer**: the page scans blocks for transactions
+    whose receiver is the vault and reads their outcomes (`tx`). It misses
+    events of receipts sent to the vault by other contracts and blocks a
+    non-archival node has dropped; the receipts table remains the
+    authoritative history.
+38. The SDK adds `OwnerClient` and owner CLI commands (not in the feature
+    list) because the demo needs `deposit`/`add_agent`/`approve` and the
+    video storyboard uses `kill`.
