@@ -1,5 +1,6 @@
 .PHONY: build test test-unit test-sandbox fmt clippy clean size \
-        sandbox-node node-check demo demo-keep attack-log test-ts typecheck check
+        sandbox-node node-check demo demo-keep attack-log test-ts typecheck check \
+        demo-testnet
 
 # ----------------------------------------------------------------------
 # Contract (Rust)
@@ -67,6 +68,13 @@ demo: node-check build sandbox-node node_modules
 # Same, but keep the sandbox and the API running to browse the ledger page.
 demo-keep: node-check build sandbox-node node_modules
 	node examples/local_demo/run.ts --keep
+
+# The same story on NEAR testnet with accounts that already exist (see
+# docs/TESTNET.md). Reads .env.testnet if present. DRY RUN unless
+# TESTNET_CONFIRM=yes: it prints the plan and signs nothing. Never creates
+# accounts, never writes keys. STEP=deploy|fund|add-agent|run (default all).
+demo-testnet: node-check build node_modules
+	node --env-file-if-exists=.env.testnet scripts/testnet/demo.ts $(or $(STEP),all)
 
 # Re-run the demo and refresh docs/attack-log.md with the real output.
 attack-log: node-check build sandbox-node node_modules
