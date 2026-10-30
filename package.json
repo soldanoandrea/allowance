@@ -10,14 +10,16 @@
   },
   "workspaces": [
     "sdk",
-    "demo-api"
+    "demo-api",
+    "risk"
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:e2e": "vitest run sdk/test/e2e.sandbox.test.ts",
     "demo": "node examples/local_demo/run.ts",
-    "allowance": "node sdk/bin/allowance.ts"
+    "allowance": "node sdk/bin/allowance.ts",
+    "risk": "node risk/bin/allowance-risk.ts"
   },
   "devDependencies": {
     "@types/node": "24.19.2",

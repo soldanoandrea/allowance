@@ -227,7 +227,9 @@ try {
   );
 
   // Relative to the repo root (the children run there), so logs carry no local paths.
-  const common = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, keyFile)];
+  // The attacker stands for an address on a shared scam list: the agents'
+  // counterparty-risk check gets it as its deny-list.
+  const common = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, keyFile), '--deny', demo.attackerId];
   const reader = new AllowanceClient({ vaultId: demo.vaultId, rpcUrl: node.rpcUrl });
   const owner = new OwnerClient({ vaultId: demo.vaultId, ownerId: demo.ownerId, rpcUrl: node.rpcUrl, ownerKey: demo.ownerSecretKey });
 
@@ -240,7 +242,7 @@ try {
   let payeeTokens = 0n;
   if (token) {
     step('4b. NEP-141: a second agent pays in a test stablecoin');
-    const usdArgs = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, usdKeyFile)];
+    const usdArgs = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, usdKeyFile), '--deny', demo.attackerId];
     ftLoop = await runNode('sdk/examples/agent-loop.ts', [...usdArgs, '--scenario', 'ft', '--planner', values.planner ?? 'scripted']);
     const tokenView = new NearTransport({ rpcUrl: node.rpcUrl, vaultId: token.tokenId });
     payeeTokens = BigInt(await tokenView.view<string>('ft_balance_of', { account_id: demo.payeeId }));
@@ -288,6 +290,10 @@ try {
   );
   check(!pays.some((r) => r.payee === demo.attackerId && r.status.status === 'paid'), 'no payment to the attacker was ever made');
   check(attack.code === 0, 'attack demo: attacker balance unchanged, owner methods refused by the protocol');
+  check(
+    /counterparty check attacker\.\S+: BLOCK/.test(attack.output) && pays.filter((r) => r.payee === demo.payeeId).every((r) => r.memo.includes('risk=')),
+    'counterparty-risk check: attacker blocked by the deny-list before simulate; every API payment carries the risk verdict in its receipt memo',
+  );
   if (token) {
     const price = parseUnits('2', token.decimals);
     const ftPaid = pays.find((r) => typeof r.asset === 'object' && r.asset.ft === token.tokenId && r.status.status === 'paid');

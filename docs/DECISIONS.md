@@ -241,3 +241,44 @@ design says.
 51. `make demo` runs the token scenario by default (about 2 s more,
     `--no-ft` skips it): a second agent buys `/dataset/fx` for 2 SUSD, the
     vault registers the API on the token, two more checks (9 in total).
+
+### Counterparty-risk service (`risk/`)
+
+52. **Off-chain, keyless, in TypeScript** (`@allowance/risk`, a workspace
+    package with a CLI `allowance-risk`). It reads public data only: a
+    regular RPC, optionally an archival RPC and the FastNear transactions
+    API. Nothing is written on-chain; the contract's policy remains the
+    enforcement point.
+53. **Account age** = time since the first block the account is seen at.
+    Sources, in order: the FastNear transactions API (`POST
+    <base>/v0/account`, oldest-first by default, `limit: 1`; the mainnet base
+    `https://tx.main.fastnear.com` is from FastNear's docs, a testnet base
+    was not verified), then a binary search over `view_account` at block
+    heights on an archival node (log2(height) probes; skipped heights are
+    probed forward; on a pruned node the answer is "at least N days", never a
+    guess). Assumes the account was not deleted and recreated. Warn below
+    `minAgeDays` (7), block below `blockBelowAgeMinutes` (off by default).
+54. **Code change**: the current `code_hash` is compared with the one
+    `codeWindowHours` (72) ago, the height being estimated from the recent
+    block rate; if it differs, a second binary search finds the first block
+    with the current code. A contract payee is only an info signal; a code
+    swap inside the window is a warning.
+55. **History in this vault**: the newest `maxReceipts` (500) receipts, paid
+    totals per asset, rejected/failed counts, and the agents' own
+    `confirm_delivery` verdicts: any delivery marked failed is a warning
+    (on-chain reputation from the receipts the vault already keeps).
+56. **Deny-lists**: a local/shared list (`--deny`, `$ALLOWANCE_DENYLIST`) and
+    the vault's on-chain denylist; either one blocks.
+57. **Fail-safe, not fail-open**: an RPC error becomes a `check_error`
+    warning, never a silent allow. Account facts are cached 60 s; deny-lists
+    and receipts are read on every check.
+58. **Integration**: `runPaidTask` takes an optional `precheck` that runs
+    before `simulate`: `block` refuses the task without a transaction; `warn`
+    and `allow` go on, and the verdict (`risk=warn[new_account]`) is appended
+    to the payment memo, which the contract stores in the receipt (the memo
+    is the contract's free-text field, so no contract change was needed).
+    DESIGN's "ask a human on warn" is left to the vault's approval threshold
+    rather than a second, off-chain approval path. In `make demo` every
+    sandbox account is minutes old, so the API payments carry
+    `risk=warn[new_account]`, and the attacker, passed as the shared
+    deny-list, is blocked before `simulate` (a tenth check).

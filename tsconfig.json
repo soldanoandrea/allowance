@@ -29,6 +29,9 @@
     "sdk/test/**/*.ts",
     "demo-api/src/**/*.ts",
     "demo-api/test/**/*.ts",
+    "risk/src/**/*.ts",
+    "risk/bin/**/*.ts",
+    "risk/test/**/*.ts",
     "examples/local_demo/**/*.ts",
     "vitest.config.ts"
   ]

@@ -3,7 +3,10 @@
  * paid API to write a short NEAR/USDC report. For every dataset it:
  *
  *   1. calls the API and gets HTTP 402 with a price, an asset and a payee;
- *   2. runs the free `simulate` view on its vault;
+ *   2. checks the payee with the counterparty-risk service (risk/: deny-list,
+ *      account age, code changes, history in this vault): block -> refuse,
+ *      warn -> go on and write the verdict into the payment memo;
+ *      then runs the free `simulate` view on its vault;
  *   3. allow          -> pays, retries with the receipt, checks the data,
  *                        records confirm_delivery(passed);
  *      needs_approval -> makes ONE counteroffer (X-Allowance-Offer) at the
@@ -68,6 +71,7 @@ for (const task of tasks) {
     planner: config.planner,
     log,
     approvalTimeoutMs: config.approvalTimeoutMs,
+    ...(config.precheck ? { precheck: config.precheck } : {}),
   });
   results.push({ task, result });
   log(`=> ${result.status}${result.status === 'delivered' ? '' : `: ${result.reason}`}`);

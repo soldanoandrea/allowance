@@ -89,6 +89,23 @@ describe('agent task loop against the demo API (in-memory vault)', () => {
     }
   });
 
+  it('a counterparty pre-check runs before simulate: block refuses, warn is written into the memo', async () => {
+    const blocked = await runPaidTask(
+      { name: 'candles', url: `${url}/dataset` },
+      { ...deps(), precheck: async () => ({ verdict: 'block', reason: 'api.test is on the deny-list', note: 'risk=block[denylisted]' }) },
+    );
+    expect(blocked).toEqual({ status: 'refused', reason: 'counterparty check: api.test is on the deny-list', receiptId: null });
+    expect(vault.calls.some((c) => c.method === 'simulate' || c.method === 'pay')).toBe(false);
+
+    const warned = await runPaidTask(
+      { name: 'candles', url: `${url}/dataset` },
+      { ...deps(), precheck: async () => ({ verdict: 'warn', reason: 'young account', note: 'risk=warn[new_account]' }) },
+    );
+    expect(warned.status).toBe('delivered');
+    expect(vault.receipts[0]?.memo).toBe('candles | /dataset | risk=warn[new_account]');
+    expect(lines).toContain('counterparty check api.test: WARN (young account)');
+  });
+
   it('free resources need no payment', async () => {
     const res = await runPaidTask({ name: 'news', url: `${url}/web/market-news` }, deps());
     expect(res).toMatchObject({ status: 'delivered', receiptId: null, paidAmount: 0n });
