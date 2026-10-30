@@ -95,10 +95,11 @@ export function readConfig(env: Record<string, string | undefined>, argv: string
     approverId,
     depositNear: amount('TESTNET_DEPOSIT_NEAR', '2'),
     policy: {
-      perTxCap: amount('TESTNET_PER_TX_CAP', '0.5'),
-      budget: amount('TESTNET_BUDGET', '1'),
+      // The local demo's policy: the three datasets show allow, counteroffer and approval.
+      perTxCap: amount('TESTNET_PER_TX_CAP', '1'),
+      budget: amount('TESTNET_BUDGET', '2'),
       period: env['TESTNET_BUDGET_PERIOD']?.trim() || '1d',
-      approvalThreshold: amount('TESTNET_APPROVAL_THRESHOLD', '0.25'),
+      approvalThreshold: amount('TESTNET_APPROVAL_THRESHOLD', '0.5'),
     },
     archivalRpcUrl: archival,
     denylist: (env['TESTNET_DENYLIST'] ?? '').split(',').map((s) => s.trim()).filter(Boolean),

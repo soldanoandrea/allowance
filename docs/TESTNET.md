@@ -24,9 +24,12 @@ Same as the local demo (Rust + `cargo-near` 0.22, Node 24), plus
 [near-cli-rs](https://github.com/near/near-cli-rs) 0.30 to create accounts.
 Build once: `make build` (writes `target/near/allowance.wasm`).
 
-Budget: the faucet account gets testnet NEAR for free. The vault needs about
-**4.5 NEAR** on its account before the deploy (the 365 KB contract locks
-~3.7 NEAR of storage stake) plus the deposit (2 NEAR by default).
+Budget: the faucet sponsors the owner account with free testnet NEAR (top it
+up with the faucet described at https://docs.near.org/getting-started/faucet
+if needed). The vault needs about **4.5 NEAR** on its account before the
+deploy (the 365 KB contract locks ~3.7 NEAR of storage stake), plus the
+deposit (2 NEAR by default, which covers the demo's 0.02 + 0.5 + 0.8 NEAR of
+purchases), plus 1 NEAR for the API account: about 8 NEAR in all.
 
 ## 1. Accounts (you create them)
 
@@ -87,8 +90,9 @@ Fill in the account ids. For each key choose one:
   `chmod 600`).
 
 Optional: `TESTNET_APPROVER_ID` (a second human or a DAO that may approve),
-the policy (`TESTNET_PER_TX_CAP` 0.5, `TESTNET_BUDGET` 1 per
-`TESTNET_BUDGET_PERIOD` 1d, `TESTNET_APPROVAL_THRESHOLD` 0.25),
+the policy (default: the local demo's, `TESTNET_PER_TX_CAP` 1,
+`TESTNET_BUDGET` 2 per `TESTNET_BUDGET_PERIOD` 1d,
+`TESTNET_APPROVAL_THRESHOLD` 0.5),
 `TESTNET_DEPOSIT_NEAR` (2), `TESTNET_DENYLIST`, `TESTNET_ARCHIVAL_RPC_URL`
 (for the counterparty-risk check's account age; without it the check says
 "at least N days" from what the regular node keeps), `TESTNET_AUTO_APPROVE=1`.
@@ -115,10 +119,10 @@ What happens, in order:
 4. **run**: starts `demo-api` on `127.0.0.1:8402` (payee `api.you.testnet`,
    trusting receipts of `vault.you.testnet`), runs `sdk/examples/agent-loop.ts`
    with the agent key: 402 -> counterparty check -> `simulate` -> `pay` ->
-   retry with the receipt -> `confirm_delivery`. The 0.8 NEAR archive is above
-   the default cap of 0.5 and is refused by the policy; lower
-   `TESTNET_APPROVAL_THRESHOLD`/raise `TESTNET_PER_TX_CAP` to see the approval
-   path. When a payment waits for a human, approve it from another terminal:
+   retry with the receipt -> `confirm_delivery`, for the three datasets of the
+   local demo (0.02 NEAR alone; 0.8 NEAR countered at 0.5; 0.8 NEAR waiting for
+   the owner). When a payment waits for a human, approve it from another
+   terminal (or set `TESTNET_AUTO_APPROVE=1`):
 
    ```sh
    npx allowance approve <request id> --vault vault.you.testnet --rpc https://test.rpc.fastnear.com \
