@@ -79,13 +79,21 @@
       view(url, vaultId, 'get_denylist', {}, f),
     ]);
     var vault = results[0];
+    // NEP-141 tokens the vault holds: read symbol and decimals from each token
+    // contract (best effort: amounts fall back to base units).
+    var tokens = {};
+    await Promise.all((vault.tokens || []).map(function (t) {
+      return view(url, t.token_id, 'ft_metadata', {}, f).then(function (m) {
+        if (m && typeof m.symbol === 'string' && typeof m.decimals === 'number') tokens[t.token_id] = { symbol: m.symbol, decimals: m.decimals };
+      }, function () {});
+    }));
     var from = Math.max(vault.first_receipt_id, vault.next_receipt_id - maxReceipts);
     var pages = [];
     for (var id = from; id < vault.next_receipt_id; id += 50) {
       pages.push(view(url, vaultId, 'get_receipts', { from_id: id, limit: 50 }, f));
     }
     var receipts = [].concat.apply([], await Promise.all(pages));
-    return { vault: vault, agents: results[1], pending: results[2], denylist: results[3], receipts: receipts };
+    return { vault: vault, agents: results[1], pending: results[2], denylist: results[3], receipts: receipts, tokens: tokens };
   }
 
   function parseEventLogs(logs) {
@@ -182,6 +190,25 @@
     return (frac ? whole + '.' + frac : String(whole)) + ' NEAR';
   }
 
+  /** Token metadata known to the page: { tokenId: { symbol, decimals } }, filled by loadSnapshot. */
+  var tokenMeta = {};
+
+  function setTokens(tokens) {
+    tokenMeta = tokens || {};
+  }
+
+  /** "0.02 NEAR", "2 SUSD", or "2000000 usd.x units" when the token's decimals are unknown. */
+  function formatAmount(amount, asset) {
+    if (!asset || asset === 'near') return formatNear(amount);
+    var token = asset.ft;
+    var meta = tokenMeta[token];
+    if (!meta) return String(amount) + ' ' + token + ' units';
+    var v = BigInt(amount);
+    var unit = 10n ** BigInt(meta.decimals);
+    var frac = (v % unit).toString().padStart(meta.decimals, '0').replace(/0+$/, '');
+    return (frac ? (v / unit) + '.' + frac : String(v / unit)) + ' ' + meta.symbol;
+  }
+
   function shortKey(key) {
     var parts = String(key).split(':');
     var body = parts.length > 1 ? parts[1] : parts[0];
@@ -216,7 +243,8 @@
     return parts.join('');
   }
 
-  function describeRejection(r) {
+  function describeRejection(r, asset) {
+    var fmt = function (v) { return formatAmount(v, asset); };
     switch (r.code) {
       case 'paused': return 'vault paused';
       case 'agent_disabled': return 'agent disabled';
@@ -224,10 +252,10 @@
       case 'asset_not_allowed': return 'asset not allowed';
       case 'denylisted': return r.payee + ' is denylisted';
       case 'not_allowlisted': return r.payee + ' is not on the allowlist';
-      case 'over_per_tx_cap': return 'above the ' + formatNear(r.cap) + ' cap';
+      case 'over_per_tx_cap': return 'above the ' + fmt(r.cap) + ' cap';
       case 'outside_time_window': return 'outside the time window';
       case 'cooldown': return 'cooldown';
-      case 'over_budget': return 'over budget (' + formatNear(r.remaining) + ' left)';
+      case 'over_budget': return 'over budget (' + fmt(r.remaining) + ' left)';
       case 'insufficient_vault_balance': return 'vault balance too low';
       case 'unknown_agent': return 'unknown agent';
       default: return r.code;
@@ -235,32 +263,39 @@
   }
 
   function describePolicy(p) {
-    var lines = ['cap ' + formatNear(p.per_tx_cap) + ' per payment'];
-    if (p.budget) lines.push('budget ' + formatNear(p.budget.amount) + ' per ' + duration(p.budget.period_ns));
+    var asset = p.asset || 'near';
+    var fmt = function (v) { return formatAmount(v, asset); };
+    var lines = asset === 'near' ? [] : ['pays in ' + asset.ft + ' (NEP-141)'];
+    lines.push('cap ' + fmt(p.per_tx_cap) + ' per payment');
+    if (p.budget) lines.push('budget ' + fmt(p.budget.amount) + ' per ' + duration(p.budget.period_ns));
     if (!p.allow || p.allow === 'any') lines.push('any payee (denylist applies)');
     else lines.push('payees: ' + p.allow.list.map(function (e) { return e.account_id; }).join(', '));
-    if (p.approval_threshold) lines.push('human approval above ' + formatNear(p.approval_threshold));
+    if (p.approval_threshold) lines.push('human approval above ' + fmt(p.approval_threshold));
     if (p.cooldown_ns && p.cooldown_ns !== '0') lines.push('cooldown ' + duration(p.cooldown_ns));
     if (p.time_window) {
       lines.push('UTC ' + p.time_window.start_h + ':00-' + p.time_window.end_h + ':00' +
         (p.time_window.days && p.time_window.days.length ? ' (ISO days ' + p.time_window.days.join(',') + ')' : ''));
     }
     if (p.expires_at_ns) lines.push('expires ' + isoFromNs(p.expires_at_ns));
+    if (p.ft_storage_deposit) lines.push('may pay up to ' + formatNear(p.ft_storage_deposit) + ' to register a payee on the token');
     return lines;
   }
 
   /** One-line, human summary of an event's data. */
   function describeEvent(ev) {
     var d = ev.data || {};
+    var amt = function () { return formatAmount(d.amount, d.asset); };
     switch (ev.event) {
-      case 'vault_funded': return formatNear(d.amount) + ' from ' + d.from + ' (receipt #' + d.receipt_id + ')';
-      case 'withdrawn': return formatNear(d.amount) + ' to ' + d.to;
+      case 'vault_funded': return amt() + ' from ' + d.from + ' (receipt #' + d.receipt_id + ')';
+      case 'withdrawn': return amt() + ' to ' + d.to;
       case 'agent_added': return describeAgent(d.agent) + ' "' + d.label + '"';
       case 'policy_set': return describeAgent(d.agent) + ' policy v' + d.policy_version;
-      case 'payment_paid':
-      case 'payment_failed': return '#' + d.receipt_id + ' ' + formatNear(d.amount) + ' -> ' + d.payee;
-      case 'payment_rejected': return '#' + d.receipt_id + ' ' + formatNear(d.amount) + ' -> ' + d.payee + ': ' + describeRejection(d.reason);
-      case 'approval_requested': return 'request #' + d.pending_id + ': ' + formatNear(d.amount) + ' -> ' + d.payee;
+      case 'payment_paid': return '#' + d.receipt_id + ' ' + amt() + ' -> ' + d.payee;
+      case 'payment_failed': return '#' + d.receipt_id + ' ' + amt() + ' -> ' + d.payee + (d.reason ? ': ' + d.reason : '');
+      case 'payment_rejected': return '#' + d.receipt_id + ' ' + amt() + ' -> ' + d.payee + ': ' + describeRejection(d.reason, d.asset);
+      case 'approval_requested': return 'request #' + d.pending_id + ': ' + amt() + ' -> ' + d.payee;
+      case 'ft_payee_registration': return '#' + d.receipt_id + ' registers ' + d.payee + ' on ' + d.token_id + ' (up to ' + formatNear(d.attached) + ')';
+      case 'token_registered': return d.token_id;
       case 'approval_granted':
       case 'approval_denied': return 'request #' + d.pending_id + ' by ' + d.approver;
       case 'delivery_confirmed': return '#' + d.receipt_id + ' ' + (d.passed ? 'pass' : 'FAIL');
@@ -276,6 +311,8 @@
     scanEvents: scanEvents,
     parseEventLogs: parseEventLogs,
     formatNear: formatNear,
+    formatAmount: formatAmount,
+    setTokens: setTokens,
     shortKey: shortKey,
     describeAgent: describeAgent,
     describeRejection: describeRejection,

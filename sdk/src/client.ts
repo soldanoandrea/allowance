@@ -1,16 +1,20 @@
 import type { KeyPairString } from 'near-api-js';
 
+import { isNear, setTokenDisplay, tokenOf } from './asset.ts';
 import { AllowanceError } from './errors.ts';
-import { NearTransport, type Finality, type VaultTransport } from './transport.ts';
+import { FT_PAY_GAS, NearTransport, type Finality, type VaultTransport } from './transport.ts';
 import type {
   AgentId,
   AgentView,
   AllowanceEvent,
+  Asset,
+  FtMetadata,
   PayOutcome,
   Pending,
   PingResponse,
   Receipt,
   Simulation,
+  TokenView,
   VaultInfo,
 } from './types.ts';
 import { toYocto } from './units.ts';
@@ -34,8 +38,10 @@ export interface AllowanceClientOptions {
 
 export interface PayRequest {
   payee: string;
-  /** yoctoNEAR (bigint or decimal string). Use `parseNear("0.02")` for NEAR. */
+  /** Base units of `asset` (bigint or decimal string). Use `parseNear("0.02")` for NEAR. */
   amount: bigint | string;
+  /** Default NEAR. Must be the agent policy's asset. */
+  asset?: Asset;
   memo?: string;
   /** base64 of 32 bytes, normally `requestHash(nonce)` from a 402 quote. */
   requestHash?: string;
@@ -107,13 +113,14 @@ export class AllowanceClient {
   // Agent actions (signed with the function-call key)
   // ------------------------------------------------------------------
 
-  /** Free dry-run: would `pay(payee, amount)` go through right now? */
-  async simulate(payee: string, amount: bigint | string, options: { agentId?: AgentId } = {}): Promise<Simulation> {
+  /** Free dry-run: would `pay(payee, amount, asset)` go through right now? */
+  async simulate(payee: string, amount: bigint | string, options: { agentId?: AgentId; asset?: Asset } = {}): Promise<Simulation> {
     assertAccountId(payee, 'payee');
     return this.transport.view<Simulation>('simulate', {
       agent_id: options.agentId ?? this.#requireAgentId(),
       payee,
       amount: toYocto(amount).toString(),
+      ...assetArg(options.asset),
     });
   }
 
@@ -128,12 +135,17 @@ export class AllowanceClient {
     if (amount <= 0n) throw new AllowanceError('config', 'amount must be > 0');
     if (request.memo !== undefined) assertMemo(request.memo);
     if (request.requestHash !== undefined) assertRequestHash(request.requestHash);
-    const result = await this.transport.call('pay', {
-      payee: request.payee,
-      amount: amount.toString(),
-      ...(request.memo !== undefined ? { memo: request.memo } : {}),
-      ...(request.requestHash !== undefined ? { request_hash: request.requestHash } : {}),
-    });
+    const result = await this.transport.call(
+      'pay',
+      {
+        payee: request.payee,
+        amount: amount.toString(),
+        ...assetArg(request.asset),
+        ...(request.memo !== undefined ? { memo: request.memo } : {}),
+        ...(request.requestHash !== undefined ? { request_hash: request.requestHash } : {}),
+      },
+      isNear(request.asset) ? {} : { gas: FT_PAY_GAS },
+    );
     return { outcome: asPayOutcome(result.value), txHash: result.txHash, events: result.events };
   }
 
@@ -153,12 +165,16 @@ export class AllowanceClient {
   // Views (free, no key needed)
   // ------------------------------------------------------------------
 
-  /** Payee-side check: is receipt `receiptId` a paid payment to `payee` of at least `minAmount`? */
+  /**
+   * Payee-side check: is receipt `receiptId` a paid payment to `payee` of at
+   * least `minAmount` of `asset` (default NEAR)?
+   */
   async verifyReceipt(args: {
     receiptId: number;
     payee: string;
     minAmount: bigint | string;
     requestHash?: string;
+    asset?: Asset;
   }): Promise<boolean> {
     assertAccountId(args.payee, 'payee');
     if (args.requestHash !== undefined) assertRequestHash(args.requestHash);
@@ -167,8 +183,30 @@ export class AllowanceClient {
       payee: args.payee,
       min_amount: toYocto(args.minAmount).toString(),
       ...(args.requestHash !== undefined ? { request_hash: args.requestHash } : {}),
+      ...assetArg(args.asset),
     });
     return ok === true;
+  }
+
+  /** A NEP-141 token registered with the vault, with the balance the vault accounts for. */
+  async token(tokenId: string): Promise<TokenView | null> {
+    assertAccountId(tokenId, 'token');
+    return (await this.transport.view<TokenView | null>('get_token', { token_id: tokenId })) ?? null;
+  }
+
+  /**
+   * NEP-148 metadata of a token, read from the token contract itself; also
+   * registers its symbol and decimals for `formatAmount`/`parseAssetAmount`.
+   */
+  async ftMetadata(tokenId: string): Promise<FtMetadata> {
+    assertAccountId(tokenId, 'token');
+    if (!this.transport.viewContract) throw new AllowanceError('config', 'this transport cannot read other contracts');
+    const meta = await this.transport.viewContract<FtMetadata>(tokenId, 'ft_metadata', {});
+    if (!meta || typeof meta.symbol !== 'string' || !Number.isInteger(meta.decimals)) {
+      throw new AllowanceError('contract_panic', `${tokenId} did not return NEP-148 metadata`);
+    }
+    setTokenDisplay(tokenId, { symbol: meta.symbol, decimals: meta.decimals });
+    return meta;
   }
 
   vault(): Promise<VaultInfo> {
@@ -230,6 +268,11 @@ export class AllowanceClient {
       await sleep(intervalMs, options.signal);
     }
   }
+}
+
+/** `{asset}` for a token, nothing for NEAR (the contract's default). */
+function assetArg(asset: Asset | undefined): { asset?: Asset } {
+  return tokenOf(asset) === null ? {} : { asset: asset as Asset };
 }
 
 function asPayOutcome(value: unknown): PayOutcome {

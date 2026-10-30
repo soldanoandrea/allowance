@@ -15,7 +15,9 @@ use near_api::errors::ExecuteTransactionError;
 use near_api::signer::generate_secret_key;
 use near_api::types::AccessKeyPermission;
 use near_api::types::transaction::result::TransactionResult;
-use near_api::{Account, AccountId, Chain, Contract, NearToken, NetworkConfig, PublicKey, Signer};
+use near_api::{
+    Account, AccountId, Chain, Contract, NearGas, NearToken, NetworkConfig, PublicKey, Signer,
+};
 use near_sandbox::Sandbox;
 use near_sdk::base64::Engine as _;
 use near_sdk::serde::de::DeserializeOwned;
@@ -31,6 +33,24 @@ fn wasm() -> &'static [u8] {
         let path = cargo_near_build::build_with_cli(Default::default())
             .expect("cargo near build non-reproducible-wasm failed");
         std::fs::read(path).expect("read compiled wasm")
+    })
+}
+
+/// The NEP-141 test token (tests/fixtures/test-token), built once per run.
+fn token_wasm() -> &'static [u8] {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    WASM.get_or_init(|| {
+        let manifest = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/test-token/Cargo.toml"
+        );
+        let path = cargo_near_build::build_with_cli(cargo_near_build::BuildOpts {
+            manifest_path: Some(manifest.into()),
+            no_abi: true,
+            ..Default::default()
+        })
+        .expect("cargo near build of the test token failed");
+        std::fs::read(path).expect("read compiled test token")
     })
 }
 
@@ -161,6 +181,30 @@ impl Env {
             .with_signer(signer_id.clone(), self.root.clone())
             .send_to(&self.network)
             .await?)
+    }
+
+    /// Any contract, any deposit, explicit gas; signed by `signer_id`'s
+    /// genesis key. Fails the test if the transaction fails.
+    async fn call_contract(
+        &self,
+        signer_id: &AccountId,
+        contract: &AccountId,
+        method: &str,
+        args: Value,
+        deposit: NearToken,
+        tgas: u64,
+    ) -> TestResult<(Value, Vec<String>)> {
+        let result = Contract(contract.clone())
+            .call_function(method, args)
+            .transaction()
+            .deposit(deposit)
+            .gas(NearGas::from_tgas(tgas))
+            .with_signer(signer_id.clone(), self.root.clone())
+            .send_to(&self.network)
+            .await?
+            .assert_success();
+        let logs = result.logs().into_iter().map(str::to_string).collect();
+        Ok((result.json().unwrap_or(Value::Null), logs))
     }
 
     async fn call_ok(
@@ -628,9 +672,15 @@ async fn rejected_payments_leave_a_receipt_and_move_nothing() -> TestResult<()> 
     )
     .await?;
     let (outcome, logs) = env.agent_pay(&agent, &ghost, millinear(30)).await?;
-    assert_eq!(outcome, json!({"outcome": "failed", "receipt_id": 4}));
+    assert_eq!(
+        outcome,
+        json!({"outcome": "failed", "receipt_id": 4, "reason": "transfer_failed"})
+    );
     assert!(has_event(&logs, "payment_failed"));
-    assert_eq!(env.receipt(4).await?["status"], json!({"status": "failed"}));
+    assert_eq!(
+        env.receipt(4).await?["status"],
+        json!({"status": "failed", "reason": "transfer_failed"})
+    );
     let state: Value = env
         .view("get_agent_state", json!({"agent_id": agent.id()}))
         .await?;
@@ -1031,5 +1081,233 @@ async fn account_based_agents_pay_from_their_own_account() -> TestResult<()> {
     assert!(msg.contains("unknown agent"), "{msg}");
     let info: Value = env.view("get_vault", json!({})).await?;
     assert_eq!(info["next_receipt_id"], json!(2));
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// 8. NEP-141 payments: storage check, payee registration, ft_transfer
+// ----------------------------------------------------------------------
+
+/// 6 decimals, like USDC.
+fn usd(n: u128) -> u128 {
+    n * 1_000_000
+}
+
+async fn ft_balance(env: &Env, token: &AccountId, account: &AccountId) -> TestResult<u128> {
+    let balance: String = Contract(token.clone())
+        .call_function("ft_balance_of", json!({"account_id": account}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await?
+        .data;
+    Ok(balance.parse()?)
+}
+
+async fn vault_token_balance(env: &Env, token: &AccountId) -> TestResult<u128> {
+    let view: Value = env.view("get_token", json!({"token_id": token})).await?;
+    Ok(view["balance"].as_str().unwrap().parse()?)
+}
+
+#[tokio::test]
+async fn nep141_payments_register_the_payee_and_settle_like_near() -> TestResult<()> {
+    let env = Env::new().await?;
+    env.deposit(&env.owner, near(5)).await?;
+
+    // A standard NEP-141 token: 1,000,000 SUSD (6 decimals) minted to the owner.
+    let token_id = create_account(&env.sandbox, "usd.sandbox").await?;
+    Contract::deploy(token_id.clone())
+        .use_code(token_wasm().to_vec())
+        .with_init_call(
+            "new",
+            json!({"owner_id": env.owner, "total_supply": usd(1_000_000).to_string(), "symbol": "SUSD", "decimals": 6}),
+        )?
+        .with_signer(env.root.clone())
+        .send_to(&env.network)
+        .await?
+        .assert_success();
+
+    // The owner lists the token; the attached NEAR registers the vault on it.
+    let (_, logs) = env
+        .call_contract(
+            &env.owner,
+            env.vault_id(),
+            "register_token",
+            json!({"token_id": token_id, "min_deposit": "1000"}),
+            millinear(10),
+            100,
+        )
+        .await?;
+    assert!(has_event(&logs, "token_registered"));
+
+    // Fund the vault with 100 SUSD through ft_transfer_call.
+    let (_, logs) = env
+        .call_contract(
+            &env.owner,
+            &token_id,
+            "ft_transfer_call",
+            json!({"receiver_id": env.vault_id(), "amount": usd(100).to_string(), "msg": "seed"}),
+            NearToken::from_yoctonear(1),
+            100,
+        )
+        .await?;
+    assert!(has_event(&logs, "vault_funded"));
+    assert_eq!(vault_token_balance(&env, &token_id).await?, usd(100));
+    assert_eq!(ft_balance(&env, &token_id, env.vault_id()).await?, usd(100));
+    let income = env.receipt(1).await?;
+    assert_eq!(income["kind"], json!("income"));
+    assert_eq!(income["asset"], json!({"ft": token_id}));
+    assert_eq!(income["memo"], json!("seed"));
+
+    // A token agent: cap 10, 20 per day, approval above 5, allowlist [api,
+    // carol], and up to 0.01 NEAR to register a payee on the token.
+    let carol = create_account(&env.sandbox, "carol.sandbox").await?;
+    let agent = AgentKey::generate()?;
+    let ft_policy = |storage: Option<NearToken>| {
+        json!({
+            "asset": {"ft": token_id},
+            "per_tx_cap": usd(10).to_string(),
+            "budget": {"amount": usd(20).to_string(), "period_ns": DAY_NS.to_string()},
+            "allow": {"list": [{"account_id": env.payee}, {"account_id": carol}]},
+            "approval_threshold": usd(5).to_string(),
+            "ft_storage_deposit": storage.map(yocto),
+        })
+    };
+    env.add_key_agent(&agent, "usd-worker", ft_policy(Some(millinear(10))))
+        .await?;
+    let ft = json!({"ft": token_id});
+    let sim: Value = env
+        .view(
+            "simulate",
+            json!({"agent_id": agent.id(), "payee": env.payee, "amount": usd(2).to_string(), "asset": ft}),
+        )
+        .await?;
+    assert_eq!(sim["verdict"], json!("allow"));
+    assert_eq!(sim["vault_available"], json!(usd(100).to_string()));
+
+    // api.sandbox has no storage on the token: the vault registers it, then pays.
+    assert_eq!(ft_balance(&env, &token_id, &env.payee).await?, 0);
+    let vault_near_before = env.balance(env.vault_id()).await?;
+    let result = env
+        .agent_call(
+            &agent,
+            "pay",
+            json!({"payee": env.payee, "amount": usd(2).to_string(), "asset": ft, "memo": "candles"}),
+        )
+        .await?
+        .assert_success();
+    let outcome: Value = result.json()?;
+    assert_eq!(outcome, json!({"outcome": "paid", "receipt_id": 2}));
+    let logs: Vec<String> = result.logs().into_iter().map(str::to_string).collect();
+    assert!(has_event(&logs, "ft_payee_registration"));
+    assert!(has_event(&logs, "payment_paid"));
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("ft_transfer") && l.contains("allowance:vault.sandbox#2")),
+        "the token's ft_transfer event carries the receipt id in its memo: {logs:?}"
+    );
+    assert_eq!(ft_balance(&env, &token_id, &env.payee).await?, usd(2));
+    assert_eq!(vault_token_balance(&env, &token_id).await?, usd(98));
+    assert_eq!(ft_balance(&env, &token_id, env.vault_id()).await?, usd(98));
+    let receipt = env.receipt(2).await?;
+    assert_eq!(receipt["status"], json!({"status": "paid"}));
+    assert_eq!(receipt["asset"], ft);
+    assert_eq!(token(&receipt["storage_deposit"]), millinear(10));
+    let spent = vault_near_before.saturating_sub(env.balance(env.vault_id()).await?);
+    assert!(
+        spent < millinear(10),
+        "registration_only: the token refunded what it did not need ({spent})"
+    );
+
+    // Payee-side verification is asset-aware.
+    let verify = |asset: Value| {
+        env.view::<bool>(
+            "verify_receipt",
+            json!({"receipt_id": 2, "payee": env.payee, "min_amount": usd(2).to_string(), "asset": asset}),
+        )
+    };
+    assert!(verify(ft.clone()).await?);
+    assert!(
+        !verify(Value::Null).await?,
+        "without `asset` a receipt verifies only as NEAR"
+    );
+    assert!(!verify(json!("near")).await?);
+
+    // Registered now: the second payment skips the registration.
+    let result = env
+        .agent_call(
+            &agent,
+            "pay",
+            json!({"payee": env.payee, "amount": usd(1).to_string(), "asset": ft}),
+        )
+        .await?
+        .assert_success();
+    let logs: Vec<String> = result.logs().into_iter().map(str::to_string).collect();
+    assert_eq!(result.json::<Value>()?["outcome"], json!("paid"));
+    assert!(has_event(&logs, "payment_paid"));
+    assert!(!has_event(&logs, "ft_payee_registration"));
+    assert_eq!(env.receipt(3).await?["storage_deposit"], Value::Null);
+
+    // Without `ft_storage_deposit` an unregistered payee is not paid, and the
+    // reservation (budget and tokens) is released.
+    env.call_ok(
+        &env.owner,
+        "set_policy",
+        json!({"agent_id": agent.id(), "policy": ft_policy(None)}),
+    )
+    .await?;
+    let result = env
+        .agent_call(
+            &agent,
+            "pay",
+            json!({"payee": carol, "amount": usd(1).to_string(), "asset": ft}),
+        )
+        .await?
+        .assert_success();
+    let outcome: Value = result.json()?;
+    assert_eq!(
+        outcome,
+        json!({"outcome": "failed", "receipt_id": 4, "reason": "payee_not_registered"})
+    );
+    assert_eq!(ft_balance(&env, &token_id, &carol).await?, 0);
+    assert_eq!(vault_token_balance(&env, &token_id).await?, usd(97));
+    let state: Value = env
+        .view("get_agent_state", json!({"agent_id": agent.id()}))
+        .await?;
+    assert_eq!(state["spent_in_window"], json!(usd(3).to_string()));
+
+    // Above the approval threshold: queued, then approved by the owner.
+    let outcome: Value = env
+        .agent_call(
+            &agent,
+            "pay",
+            json!({"payee": env.payee, "amount": usd(6).to_string(), "asset": ft}),
+        )
+        .await?
+        .assert_success()
+        .json()?;
+    assert_eq!(outcome["outcome"], json!("needs_approval"));
+    let pending_id = outcome["pending_id"].clone();
+    let (outcome, _) = env
+        .call_ok(&env.owner, "approve", json!({"pending_id": pending_id}))
+        .await?;
+    assert_eq!(outcome, json!({"outcome": "paid", "receipt_id": 5}));
+    assert_eq!(ft_balance(&env, &token_id, &env.payee).await?, usd(9));
+
+    // The owner withdraws tokens; the accounting follows.
+    let (_, logs) = env
+        .call_ok(
+            &env.owner,
+            "withdraw_ft",
+            json!({"token_id": token_id, "amount": usd(10).to_string()}),
+        )
+        .await?;
+    assert!(has_event(&logs, "withdrawn"));
+    assert_eq!(vault_token_balance(&env, &token_id).await?, usd(81));
+    assert_eq!(ft_balance(&env, &token_id, env.vault_id()).await?, usd(81));
+    let info: Value = env.view("get_vault", json!({})).await?;
+    assert_eq!(
+        info["tokens"],
+        json!([{"token_id": token_id, "balance": usd(81).to_string(), "min_deposit": "1000"}])
+    );
     Ok(())
 }

@@ -6,14 +6,16 @@
  *   ALLOWANCE_VAULTS      comma-separated vault accounts whose receipts are accepted
  *   ALLOWANCE_CODE_HASHES comma-separated contract code hashes (base58): accept any vault running this code
  *   ATTACKER_ACCOUNT      account named by the poisoned page (attack demo; default attacker.testnet)
+ *   API_FT_TOKEN          NEP-141 token contract: also sell /dataset/fx priced in it (decimals from ft_metadata)
  *   VERIFY_FINALITY       final (default) | optimistic
  *   PORT / HOST           default 8402 / 127.0.0.1 (PORT=0 picks a free port)
  *
  * Prints one JSON line {"url": ..., "payee": ...} on stdout when listening;
  * request logs go to stderr.
  */
-import { ReceiptVerifier } from '@allowance/sdk';
+import { NearTransport, ReceiptVerifier, setTokenDisplay, type FtMetadata } from '@allowance/sdk';
 
+import { defaultCatalog } from './catalog.ts';
 import { createApiServer } from './server.ts';
 
 function list(value: string | undefined): string[] {
@@ -34,10 +36,18 @@ if (vaults.length === 0 && codeHashes.length === 0) {
   process.exit(1);
 }
 const finality = env['VERIFY_FINALITY'] === 'optimistic' ? 'optimistic' : 'final';
+const ftToken = env['API_FT_TOKEN'];
+let ftDecimals: number | undefined;
+if (ftToken) {
+  const meta = await new NearTransport({ rpcUrl, vaultId: ftToken }).view<FtMetadata>('ft_metadata');
+  setTokenDisplay(ftToken, { symbol: meta.symbol, decimals: meta.decimals });
+  ftDecimals = meta.decimals;
+}
 const verifier = new ReceiptVerifier({ rpcUrl, trustedVaults: vaults, trustedCodeHashes: codeHashes, finality });
 const api = createApiServer({
   payee,
   verifier,
+  catalog: defaultCatalog({ ...(ftToken ? { ftToken } : {}), ...(ftDecimals !== undefined ? { ftDecimals } : {}) }),
   ...(vaults[0] ? { defaultVault: vaults[0] } : {}),
   ...(env['ATTACKER_ACCOUNT'] ? { attacker: env['ATTACKER_ACCOUNT'] } : {}),
   log: (line) => console.error(`[api] ${line}`),

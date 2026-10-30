@@ -1,6 +1,6 @@
 import type { KeyPairString } from 'near-api-js';
 
-import { NearTransport, type VaultTransport } from './transport.ts';
+import { FT_PAY_GAS, NearTransport, type CallOptions, type VaultTransport } from './transport.ts';
 import type { AgentId, AllowanceEvent, PayOutcome, Policy } from './types.ts';
 import { assertAccountId } from './validate.ts';
 
@@ -45,14 +45,33 @@ export class OwnerClient {
       });
   }
 
-  async #call<T>(method: string, args: Record<string, unknown>, deposit?: bigint): Promise<OwnerTx<T>> {
-    const result = await this.transport.call(method, args, deposit !== undefined ? { deposit } : {});
+  async #call<T>(method: string, args: Record<string, unknown>, options: CallOptions = {}): Promise<OwnerTx<T>> {
+    const result = await this.transport.call(method, args, options);
     return { value: result.value as T, txHash: result.txHash, events: result.events };
   }
 
   /** Fund the vault (anyone may deposit; >= 0.01 NEAR). Returns the income receipt id. */
   deposit(amountYocto: bigint): Promise<OwnerTx<number>> {
-    return this.#call('deposit', {}, amountYocto);
+    return this.#call('deposit', {}, { deposit: amountYocto });
+  }
+
+  /**
+   * Accept a NEP-141 token (needed before a token policy). `attachYocto`
+   * (e.g. 0.00125 NEAR) makes the vault register itself on the token.
+   */
+  registerToken(tokenId: string, options: { minDeposit?: bigint; attachYocto?: bigint } = {}): Promise<OwnerTx<null>> {
+    assertAccountId(tokenId, 'token');
+    return this.#call(
+      'register_token',
+      { token_id: tokenId, ...(options.minDeposit !== undefined ? { min_deposit: options.minDeposit.toString() } : {}) },
+      options.attachYocto !== undefined ? { deposit: options.attachYocto } : {},
+    );
+  }
+
+  /** Move tokens out of the vault (to the owner unless `to` is given). */
+  withdrawFt(tokenId: string, amount: bigint, to?: string): Promise<OwnerTx<unknown>> {
+    assertAccountId(tokenId, 'token');
+    return this.#call('withdraw_ft', { token_id: tokenId, amount: amount.toString(), ...(to ? { to } : {}) });
   }
 
   /** Register an agent; for a key agent the vault adds the key to its own account. */
@@ -74,7 +93,8 @@ export class OwnerClient {
 
   /** Release a queued payment; the policy is evaluated again right now. */
   approve(pendingId: number): Promise<OwnerTx<PayOutcome>> {
-    return this.#call('approve', { pending_id: pendingId });
+    // Enough gas for a NEP-141 payment chain too; unused gas is refunded.
+    return this.#call('approve', { pending_id: pendingId }, { gas: FT_PAY_GAS });
   }
 
   deny(pendingId: number): Promise<OwnerTx<null>> {

@@ -8,12 +8,16 @@
  *   3. start the paid demo API (demo-api/)
  *   4. run the agent loop (sdk/examples/agent-loop.ts) while this script plays
  *      the owner and approves the one request that needs a human
+ *   4b. NEP-141: a second agent, whose policy is in a test stablecoin (SUSD,
+ *      6 decimals), buys a dataset priced in it; the vault registers the API
+ *      on the token (storage_deposit) and pays with ft_transfer
  *   5. run the attack demo (sdk/examples/attack.ts)
  *   6. print the receipts, check them, print the ledger page URL, stop everything
  *
  * Flags: --keep (leave the chain and API running until Ctrl+C),
  *        --update-docs (write the attack transcript to docs/attack-log.md),
- *        --planner scripted|llm.
+ *        --planner scripted|llm,
+ *        --no-ft (skip the NEP-141 scenario).
  *
  * Every account and key exists only inside the sandbox. The agent key is
  * written to examples/local_demo/.tmp/agent-key.json (git-ignored, mode 600)
@@ -25,34 +29,47 @@ import { join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 
-import { JsonRpcProvider } from 'near-api-js';
+import { JsonRpcProvider, type KeyPairString } from 'near-api-js';
 
 import {
   AllowanceClient,
+  NearTransport,
   OwnerClient,
   buildPolicy,
   describeReceipt,
-  near,
+  formatAmount,
   parseNear,
+  parseUnits,
   sleep,
   type Receipt,
 } from '../../sdk/src/index.ts';
 import { main as cli } from '../../sdk/src/cli.ts';
-import { REPO_ROOT, bootstrapVault, sandboxPrerequisites, startSandboxNode, type SandboxNode } from '../../sdk/src/sandbox.ts';
+import {
+  REPO_ROOT,
+  bootstrapToken,
+  bootstrapVault,
+  sandboxPrerequisites,
+  startSandboxNode,
+  tokenPrerequisites,
+  type DemoToken,
+  type SandboxNode,
+} from '../../sdk/src/sandbox.ts';
 
 const { values } = parseArgs({
   options: {
     keep: { type: 'boolean', default: false },
     'update-docs': { type: 'boolean', default: false },
     planner: { type: 'string', default: 'scripted' },
+    'no-ft': { type: 'boolean', default: false },
   },
 });
+const withFt = !values['no-ft'];
 
 const TMP = join(REPO_ROOT, 'examples', 'local_demo', '.tmp');
 const say = (line = ''): void => console.log(line ? `[demo] ${line}` : '');
 const step = (title: string): void => console.log(`\n=== ${title} ===`);
 
-const missing = sandboxPrerequisites();
+const missing = sandboxPrerequisites() ?? (withFt ? tokenPrerequisites() : null);
 if (missing) {
   console.error(`[demo] ${missing}\n[demo] \`make demo\` builds both; see README "Quickstart".`);
   process.exit(1);
@@ -115,7 +132,7 @@ function startOwnerApprover(owner: OwnerClient, reader: AllowanceClient): () => 
       for (const p of await reader.pending().catch(() => [])) {
         if (seen.has(p.id)) continue;
         seen.add(p.id);
-        console.log(`[owner] approval request #${p.id}: ${near(p.amount)} -> ${p.payee} "${p.memo}"`);
+        console.log(`[owner] approval request #${p.id}: ${formatAmount(p.amount, p.asset)} -> ${p.payee} "${p.memo}"`);
         console.log('[owner] approving it (this stands in for the human tapping "Approve" on the ledger/CLI)');
         const tx = await owner.approve(p.id);
         approved++;
@@ -155,14 +172,36 @@ try {
     log: (l) => console.log(`[owner] ${l}`),
   });
   say('policy: cap 1 NEAR per payment, budget 2 NEAR per day, payees [' + demo.payeeId + '], human approval above 0.5 NEAR');
-  const keyFile = join(TMP, 'agent-key.json');
-  writeFileSync(
-    keyFile,
-    JSON.stringify({ account_id: demo.vaultId, public_key: demo.agentPublicKey, private_key: demo.agentSecretKey }, null, 2),
-    { mode: 0o600 },
-  );
-  chmodSync(keyFile, 0o600);
+  const writeKey = (name: string, publicKey: string, secretKey: KeyPairString): string => {
+    const file = join(TMP, name);
+    writeFileSync(file, JSON.stringify({ account_id: demo.vaultId, public_key: publicKey, private_key: secretKey }, null, 2), { mode: 0o600 });
+    chmodSync(file, 0o600);
+    return file;
+  };
+  const keyFile = writeKey('agent-key.json', demo.agentPublicKey, demo.agentSecretKey);
   say(`agent key (sandbox only) -> ${keyFile}`);
+
+  let token: DemoToken | undefined;
+  let usdKeyFile = '';
+  if (withFt) {
+    token = await bootstrapToken({
+      node,
+      demo,
+      policy: ({ payeeId, tokenId, decimals }) =>
+        buildPolicy({
+          asset: { ft: tokenId, decimals },
+          perTxCap: '10',
+          budget: { amount: '20', period: '1d' },
+          allow: [payeeId],
+          approvalThreshold: '5',
+          ftStorageDeposit: '0.01',
+        }),
+      log: (l) => console.log(`[owner] ${l}`),
+    });
+    say(`token policy: cap 10 ${token.symbol}, budget 20 ${token.symbol} per day, payees [${demo.payeeId}], approval above 5 ${token.symbol}, may pay 0.01 NEAR to register a payee on the token`);
+    usdKeyFile = writeKey('agent-usd-key.json', token.agentPublicKey, token.agentSecretKey);
+    say(`token agent key (sandbox only) -> ${usdKeyFile}`);
+  }
 
   step('3. paid demo API');
   const apiUrl = await startApi({
@@ -171,6 +210,7 @@ try {
     // Accept receipts from any vault that runs this exact Allowance build.
     ALLOWANCE_CODE_HASHES: demo.codeHash,
     ATTACKER_ACCOUNT: demo.attackerId,
+    ...(token ? { API_FT_TOKEN: token.tokenId } : {}),
     PORT: '0',
   });
   writeFileSync(
@@ -180,6 +220,7 @@ try {
       `ALLOWANCE_VAULT=${demo.vaultId}`,
       `ALLOWANCE_OWNER=${demo.ownerId}`,
       `DEMO_API_URL=${apiUrl}`,
+      ...(token ? [`# NEP-141 test token: ${token.tokenId} (${token.symbol}); token agent key: --key-file ${usdKeyFile}`] : []),
       `# agent key: --key-file ${keyFile}`,
       '',
     ].join('\n'),
@@ -194,6 +235,17 @@ try {
   const stopApprover = startOwnerApprover(owner, reader);
   const loop = await runNode('sdk/examples/agent-loop.ts', [...common, '--planner', values.planner ?? 'scripted', '--approval-timeout', '60']);
   const approvals = await stopApprover();
+
+  let ftLoop = { code: 0, output: '' };
+  let payeeTokens = 0n;
+  if (token) {
+    step('4b. NEP-141: a second agent pays in a test stablecoin');
+    const usdArgs = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, usdKeyFile)];
+    ftLoop = await runNode('sdk/examples/agent-loop.ts', [...usdArgs, '--scenario', 'ft', '--planner', values.planner ?? 'scripted']);
+    const tokenView = new NearTransport({ rpcUrl: node.rpcUrl, vaultId: token.tokenId });
+    payeeTokens = BigInt(await tokenView.view<string>('ft_balance_of', { account_id: demo.payeeId }));
+    say(`${demo.payeeId} now holds ${formatAmount(payeeTokens, { ft: token.tokenId })} on ${token.tokenId}`);
+  }
 
   step('5. attack: prompt-injected agent tries to pay an attacker');
   const attack = await runNode('sdk/examples/attack.ts', common);
@@ -236,6 +288,15 @@ try {
   );
   check(!pays.some((r) => r.payee === demo.attackerId && r.status.status === 'paid'), 'no payment to the attacker was ever made');
   check(attack.code === 0, 'attack demo: attacker balance unchanged, owner methods refused by the protocol');
+  if (token) {
+    const price = parseUnits('2', token.decimals);
+    const ftPaid = pays.find((r) => typeof r.asset === 'object' && r.asset.ft === token.tokenId && r.status.status === 'paid');
+    check(
+      ftLoop.code === 0 && ftPaid?.amount === price.toString() && ftPaid.delivered === true && ftPaid.storage_deposit !== null,
+      `NEP-141: 2 ${token.symbol} paid with ft_transfer by the token agent, the vault registered the payee on the token first, delivered${ftPaid ? ` (${describeReceipt(ftPaid)})` : ''}`,
+    );
+    check(payeeTokens === price, `NEP-141: ${demo.payeeId} received exactly 2 ${token.symbol} on ${token.tokenId}`);
+  }
 
   step('ledger');
   const url = new URL(`file://${join(REPO_ROOT, 'ledger', 'index.html')}`);

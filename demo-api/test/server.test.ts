@@ -1,6 +1,7 @@
 import { HEADERS, parseNear, parsePaymentRequired, requestHash, type PaymentRequired, type ReceiptClaim, type VerifyResult } from '@allowance/sdk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { defaultCatalog } from '../src/catalog.ts';
 import { createApiServer, type ApiServer } from '../src/server.ts';
 
 let api: ApiServer;
@@ -41,7 +42,7 @@ async function quote(path = '/dataset'): Promise<PaymentRequired> {
 describe('demo API: HTTP 402 flow', () => {
   it('answers 402 with a valid quote: payee, price, nonce and sha256(nonce)', async () => {
     const q = await quote();
-    expect(q).toMatchObject({ payee: 'api.test', asset: 'near', amount_yocto: parseNear('0.02').toString(), resource: '/dataset' });
+    expect(q).toMatchObject({ payee: 'api.test', asset: 'near', amount: parseNear('0.02').toString(), resource: '/dataset' });
     expect(q.request_hash_base64).toBe(requestHash(q.nonce));
     expect(q.accepts.vaults).toEqual(['vault.test']);
     expect(q.instructions).toContain(HEADERS.receipt);
@@ -55,7 +56,7 @@ describe('demo API: HTTP 402 flow', () => {
     expect(ok.status).toBe(200);
     expect(ok.headers.get('x-allowance-paid')).toBe('vault.test:7');
     expect((ok.body['data'] as { rows: unknown[] }).rows).toHaveLength(30);
-    expect(claims[0]).toEqual({ vaultId: 'vault.test', receiptId: 7, payee: 'api.test', minAmount: parseNear('0.02'), nonce: q.nonce });
+    expect(claims[0]).toEqual({ vaultId: 'vault.test', receiptId: 7, payee: 'api.test', minAmount: parseNear('0.02'), asset: 'near', nonce: q.nonce });
     const replay = await get('/dataset', headers);
     expect(replay.status).toBe(402);
     expect(replay.body['error']).toBe('unknown_nonce');
@@ -90,12 +91,33 @@ describe('demo API: HTTP 402 flow', () => {
 
   it('accepts a counteroffer at or above the floor, otherwise keeps the list price', async () => {
     const accepted = parsePaymentRequired((await get('/dataset/premium', { [HEADERS.offer]: parseNear('0.5').toString(), [HEADERS.offerReason]: 'r' })).body);
-    expect(accepted.amount_yocto).toBe(parseNear('0.5').toString());
-    expect(accepted.counteroffer).toMatchObject({ status: 'accepted', list_price_yocto: parseNear('0.8').toString() });
+    expect(accepted.amount).toBe(parseNear('0.5').toString());
+    expect(accepted.counteroffer).toMatchObject({ status: 'accepted', list_price: parseNear('0.8').toString() });
     const rejected = parsePaymentRequired((await get('/dataset/archive', { [HEADERS.offer]: parseNear('0.5').toString() })).body);
-    expect(rejected.amount_yocto).toBe(parseNear('0.8').toString());
+    expect(rejected.amount).toBe(parseNear('0.8').toString());
     expect(rejected.counteroffer?.status).toBe('rejected');
     expect((await get('/dataset', { [HEADERS.offer]: 'lots' })).status).toBe(400);
+  });
+
+  it('sells a dataset priced in a NEP-141 token and verifies receipts in that token', async () => {
+    const ftApi = createApiServer({
+      payee: 'api.test',
+      catalog: defaultCatalog({ ftToken: 'usd.test', ftDecimals: 6 }),
+      verifier: { accepts: { vaults: ['vault.test'], code_hashes: [] }, verify: async (c) => (claims.push(c), { ok: true, blockHash: 'b' }) },
+    });
+    const ftUrl = await ftApi.listen();
+    try {
+      const res = await fetch(`${ftUrl}/dataset/fx`);
+      expect(res.status).toBe(402);
+      const q = parsePaymentRequired(await res.json());
+      expect(q).toMatchObject({ asset: { ft: 'usd.test' }, amount: '2000000' });
+      expect(q.instructions).toContain('asset={"ft":"usd.test"}');
+      const ok = await fetch(`${ftUrl}/dataset/fx`, { headers: { [HEADERS.receipt]: 'vault.test:3', [HEADERS.nonce]: q.nonce } });
+      expect(ok.status).toBe(200);
+      expect(claims.at(-1)).toMatchObject({ asset: { ft: 'usd.test' }, minAmount: 2_000_000n });
+    } finally {
+      await ftApi.close();
+    }
   });
 
   it('serves the catalog, the poisoned page, 404 and 405', async () => {

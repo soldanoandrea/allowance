@@ -8,6 +8,8 @@ export interface ExampleConfig {
   rpcUrl: string;
   planner: Planner;
   approvalTimeoutMs: number;
+  /** `near` (default): the three NEAR datasets; `ft`: the dataset priced in a NEP-141 token. */
+  scenario: 'near' | 'ft';
   log: (line: string) => void;
 }
 
@@ -17,7 +19,8 @@ const USAGE = `options:
   --api <url>              paid demo API base URL ($DEMO_API_URL)
   --key-file <path>        agent function-call key file (or $ALLOWANCE_AGENT_KEY)
   --planner scripted|llm   default scripted; llm uses NEAR AI Cloud with $NEAR_AI_API_KEY
-  --approval-timeout <s>   how long to wait for the owner (default 120)`;
+  --approval-timeout <s>   how long to wait for the owner (default 120)
+  --scenario near|ft       agent loop: NEAR datasets (default) or the NEP-141-priced one`;
 
 /** Shared flags of the example agents. The key is read, never written. */
 export function exampleConfig(argv: string[], prefix: string): ExampleConfig {
@@ -30,6 +33,7 @@ export function exampleConfig(argv: string[], prefix: string): ExampleConfig {
       'key-file': { type: 'string' },
       planner: { type: 'string', default: 'scripted' },
       'approval-timeout': { type: 'string', default: '120' },
+      scenario: { type: 'string', default: 'near' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -68,7 +72,12 @@ export function exampleConfig(argv: string[], prefix: string): ExampleConfig {
     console.error(`unknown planner ${JSON.stringify(values.planner)} (scripted | llm)`);
     process.exit(1);
   }
+  if (values.scenario !== 'near' && values.scenario !== 'ft') {
+    console.error(`unknown scenario ${JSON.stringify(values.scenario)} (near | ft)`);
+    process.exit(1);
+  }
   return {
+    scenario: values.scenario,
     client: new AllowanceClient({ vaultId, rpcUrl, agentKey: key.secretKey }),
     apiUrl: apiUrl.replace(/\/$/, ''),
     rpcUrl,

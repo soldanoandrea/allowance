@@ -1,13 +1,29 @@
 export { AllowanceClient, sleep, type AllowanceClientOptions, type PayRequest, type PayResult, type TxInfo, type WaitOptions } from './client.ts';
 export { OwnerClient, type OwnerClientOptions, type OwnerTx } from './owner.ts';
-export { NearTransport, DEFAULT_GAS, type VaultTransport, type CallResult, type CallOptions, type Finality } from './transport.ts';
+export { NearTransport, DEFAULT_GAS, FT_PAY_GAS, type VaultTransport, type CallResult, type CallOptions, type Finality } from './transport.ts';
+export {
+  NEAR,
+  assetDecimals,
+  assetLabel,
+  assetUnit,
+  formatAmount,
+  isAsset,
+  isNear,
+  parseAsset,
+  parseAssetAmount,
+  sameAsset,
+  setTokenDisplay,
+  tokenDisplay,
+  tokenOf,
+  type TokenDisplay,
+} from './asset.ts';
 export { AllowanceError, toAllowanceError, type AllowanceErrorCode } from './errors.ts';
 export { parseEvents, logsOf } from './events.ts';
 export { requestHash, newNonce, isRequestHash } from './hash.ts';
 export { loadKey, AGENT_KEY_ENV, OWNER_KEY_ENV, type LoadedKey, type KeySource } from './keys.ts';
-export { parseNear, parseAmount, formatNear, near, toYocto, nsToDate, YOCTO_PER_NEAR } from './units.ts';
+export { parseNear, parseAmount, parseUnits, formatNear, formatUnits, near, toYocto, nsToDate, YOCTO_PER_NEAR } from './units.ts';
 export { buildPolicy, parseDuration, type PolicySpec } from './policy.ts';
-export { describeRejection, describeStatus, describeAgent, describePolicy, describeReceipt, shortKey, duration, iso } from './describe.ts';
+export { describeRejection, describeFailure, describeStatus, describeAgent, describePolicy, describeReceipt, shortKey, duration, iso } from './describe.ts';
 export { isAccountId } from './validate.ts';
 export {
   PAYMENT_SCHEME,

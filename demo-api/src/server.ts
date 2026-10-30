@@ -4,8 +4,9 @@ import type { AddressInfo } from 'node:net';
 import {
   HEADERS,
   PAYMENT_SCHEME,
+  assetUnit,
+  formatAmount,
   newNonce,
-  near,
   parseReceiptHeader,
   receiptHeader,
   requestHash,
@@ -73,22 +74,24 @@ export function createApiServer(options: ApiOptions): ApiServer {
   }
 
   function body402(quote: Quote, error?: { error: string; detail: string }): PaymentRequired {
+    const asset = quote.product.asset;
+    const assetArg = asset === 'near' ? '' : `, asset=${JSON.stringify(asset)}`;
     return {
       scheme: PAYMENT_SCHEME,
       resource: quote.product.path,
       description: quote.product.description,
       payee: options.payee,
-      asset: 'near',
-      amount_yocto: quote.amount.toString(),
+      asset,
+      amount: quote.amount.toString(),
       nonce: quote.nonce,
       request_hash_base64: requestHash(quote.nonce),
       expires_at: new Date(quote.expiresAt).toISOString(),
       accepts: options.verifier.accepts,
       instructions:
-        `Pay ${near(quote.amount)} to ${options.payee} from an Allowance vault: ` +
-        `pay(payee="${options.payee}", amount="${quote.amount}", request_hash="${requestHash(quote.nonce)}"), ` +
+        `Pay ${formatAmount(quote.amount, asset)} to ${options.payee} from an Allowance vault: ` +
+        `pay(payee="${options.payee}", amount="${quote.amount}"${assetArg}, request_hash="${requestHash(quote.nonce)}"), ` +
         `then repeat this request with headers ${HEADERS.receipt}: <vault>:<receipt id> and ${HEADERS.nonce}: ${quote.nonce}. ` +
-        `One counteroffer is welcome: ${HEADERS.offer}: <yoctoNEAR> with ${HEADERS.offerReason}.`,
+        `One counteroffer is welcome: ${HEADERS.offer}: <base units of ${assetUnit(asset)}> with ${HEADERS.offerReason}.`,
       ...(quote.counteroffer ? { counteroffer: quote.counteroffer } : {}),
       ...(error ? { error: error.error, error_detail: error.detail } : {}),
     };
@@ -109,7 +112,7 @@ export function createApiServer(options: ApiOptions): ApiServer {
       if (usedReceipts.has(key)) {
         return send(res, 402, body402(quote, { error: 'receipt_already_used', detail: `${key} was already redeemed` }));
       }
-      const result = await options.verifier.verify({ ...parsed, payee: options.payee, minAmount: quote.amount, nonce });
+      const result = await options.verifier.verify({ ...parsed, payee: options.payee, minAmount: quote.amount, asset: product.asset, nonce });
       if (!result.ok) {
         log(`GET ${product.path}  receipt ${key} REFUSED: ${result.reason} (${result.detail})`);
         return send(res, 402, body402(quote, { error: result.reason, detail: result.detail }));
@@ -121,31 +124,32 @@ export function createApiServer(options: ApiOptions): ApiServer {
       return send(res, 200, {
         resource: product.path,
         description: product.description,
-        paid: { vault: parsed.vaultId, receipt_id: parsed.receiptId, amount_yocto: quote.amount.toString() },
+        paid: { vault: parsed.vaultId, receipt_id: parsed.receiptId, asset: product.asset, amount: quote.amount.toString() },
         data: product.data(),
       });
     }
 
     const offerText = header(req, HEADERS.offer);
     if (offerText) {
-      if (!/^\d{1,40}$/.test(offerText)) return send(res, 400, { error: 'bad_offer', error_detail: `${HEADERS.offer} must be yoctoNEAR` });
+      if (!/^\d{1,40}$/.test(offerText)) return send(res, 400, { error: 'bad_offer', error_detail: `${HEADERS.offer} must be base units of the asset` });
       const offer = BigInt(offerText);
       const reason = header(req, HEADERS.offerReason) ?? '';
       const accepted = offer >= product.floor && offer < product.price;
+      const fmt = (v: bigint): string => formatAmount(v, product.asset);
       const counteroffer: Counteroffer = {
         status: accepted ? 'accepted' : 'rejected',
-        offered_yocto: offer.toString(),
-        list_price_yocto: product.price.toString(),
+        offered: offer.toString(),
+        list_price: product.price.toString(),
         reason: accepted
-          ? `Deal: ${near(offer)} paid now beats ${near(product.price)} paid later.`
-          : `${near(offer)} is below what we can accept for this dataset; the list price stands.`,
+          ? `Deal: ${fmt(offer)} paid now beats ${fmt(product.price)} paid later.`
+          : `${fmt(offer)} is below what we can accept for this dataset; the list price stands.`,
       };
-      log(`GET ${product.path}  counteroffer ${near(offer)} ("${reason.slice(0, 80)}") -> ${counteroffer.status}`);
+      log(`GET ${product.path}  counteroffer ${fmt(offer)} ("${reason.slice(0, 80)}") -> ${counteroffer.status}`);
       return send(res, 402, body402(issueQuote(product, accepted ? offer : product.price, counteroffer)));
     }
 
     const quote = issueQuote(product, product.price);
-    log(`GET ${product.path}  -> 402 quote ${near(quote.amount)} (nonce ${quote.nonce})`);
+    log(`GET ${product.path}  -> 402 quote ${formatAmount(quote.amount, product.asset)} (nonce ${quote.nonce})`);
     return send(res, 402, body402(quote));
   }
 
@@ -158,7 +162,7 @@ export function createApiServer(options: ApiOptions): ApiServer {
         payee: options.payee,
         scheme: PAYMENT_SCHEME,
         accepts: options.verifier.accepts,
-        products: catalog.map((p) => ({ path: p.path, description: p.description, price_yocto: p.price.toString() })),
+        products: catalog.map((p) => ({ path: p.path, description: p.description, asset: p.asset, price: p.price.toString() })),
       });
     }
     if (path === '/web/market-news') {

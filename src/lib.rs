@@ -6,7 +6,8 @@
 //! `confirm_delivery` and `ping` on this contract, within a gas allowance,
 //! never attaching deposits); the contract limits how much money moves, to
 //! whom and when. Every payment, rejection and approval leaves a receipt and a
-//! NEP-297 event.
+//! NEP-297 event. Payments are in NEAR or in a NEP-141 fungible token (one
+//! asset per agent policy); the vault keeps its own per-asset accounting.
 //!
 //! Trust model: the owner is `owner_id` (checked on `predecessor_account_id`),
 //! never "whoever holds a key on this account". Agents are identified by
@@ -17,18 +18,18 @@ pub mod events;
 pub mod policy;
 pub mod types;
 
-use near_sdk::json_types::{Base64VecU8, U64};
+use near_sdk::json_types::{Base64VecU8, U64, U128};
 use near_sdk::store::{IterableMap, IterableSet, LookupMap};
 use near_sdk::{
     AccountId, Allowance, BorshStorageKey, Gas, NearToken, PanicOnDefault, Promise, PromiseError,
-    PromiseOrValue, PublicKey, env, near, require,
+    PromiseOrValue, PublicKey, env, ext_contract, near, require, serde_json,
 };
 
 use events::Event;
 use policy::{Asset, Decision, EvalContext, NS_PER_SEC, PayRequest, Policy, Rejection, evaluate};
 use types::{
-    Agent, AgentId, AgentView, PayOutcome, Pending, PingResponse, Receipt, ReceiptKind,
-    ReceiptStatus, Simulation, VaultInfo, Verdict,
+    Agent, AgentId, AgentView, Failure, PayOutcome, Pending, PingResponse, Receipt, ReceiptKind,
+    ReceiptStatus, Simulation, TokenAccount, TokenView, VaultInfo, Verdict,
 };
 
 /// Methods an agent key may call. Everything else is refused by the protocol
@@ -50,8 +51,21 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub const STORAGE_HEADROOM: NearToken = NearToken::from_millinear(10);
 /// Length of `request_hash`.
 pub const REQUEST_HASH_BYTES: usize = 32;
-const GAS_FOR_PAY_CALLBACK: Gas = Gas::from_tgas(5);
+const GAS_FOR_PAY_CALLBACK: Gas = Gas::from_tgas(10);
 const GAS_FOR_KEY_CALLBACK: Gas = Gas::from_tgas(5);
+/// NEP-145 `storage_balance_of` on the token (a read).
+const GAS_FOR_FT_STORAGE_CHECK: Gas = Gas::from_tgas(5);
+/// NEP-145 `storage_deposit` on the token.
+const GAS_FOR_FT_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
+/// NEP-141 `ft_transfer` on the token.
+const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(15);
+/// `on_ft_storage_checked`: its own work plus the storage deposit, the
+/// transfer and the settlement callback it schedules.
+const GAS_FOR_FT_STEP: Gas = Gas::from_tgas(50);
+/// NEP-141 requires exactly one yoctoNEAR on `ft_transfer`.
+const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+/// Longest promise result read from a token contract (defensive bound).
+const MAX_TOKEN_RESULT_BYTES: usize = 1_024;
 const DEFAULT_PAGE: u64 = 50;
 
 #[near]
@@ -61,6 +75,16 @@ enum StorageKey {
     Denylist,
     Receipts,
     Pending,
+    Tokens,
+}
+
+/// The NEP-141 / NEP-145 methods the vault calls on a token contract.
+#[ext_contract(ext_ft)]
+#[allow(dead_code)]
+trait FungibleToken {
+    fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
+    fn storage_deposit(&mut self, account_id: Option<AccountId>, registration_only: Option<bool>);
+    fn storage_balance_of(&self, account_id: AccountId);
 }
 
 #[near(contract_state)]
@@ -78,6 +102,8 @@ pub struct Vault {
     first_receipt_id: u64,
     pending: IterableMap<u64, Pending>,
     next_pending_id: u64,
+    /// NEP-141 tokens the owner registered, with the vault's own accounting.
+    tokens: IterableMap<AccountId, TokenAccount>,
 }
 
 #[near]
@@ -118,6 +144,7 @@ impl Vault {
             first_receipt_id: 0,
             pending: IterableMap::new(StorageKey::Pending),
             next_pending_id: 0,
+            tokens: IterableMap::new(StorageKey::Tokens),
         }
     }
 
@@ -150,10 +177,12 @@ impl Vault {
             delivered: None,
             pending_id: None,
             approved_by: None,
+            storage_deposit: None,
         });
         Event::VaultFunded {
             from,
             amount,
+            asset: Asset::Near,
             receipt_id,
         }
         .emit();
@@ -186,14 +215,195 @@ impl Vault {
             delivered: None,
             pending_id: None,
             approved_by: None,
+            storage_deposit: None,
         });
         Event::Withdrawn {
             to: to.clone(),
             amount,
+            asset: Asset::Near,
             receipt_id,
         }
         .emit();
         Promise::new(to).transfer(amount)
+    }
+
+    // ------------------------------------------------------------------
+    // NEP-141 tokens
+    // ------------------------------------------------------------------
+
+    /// Owner: accept a NEP-141 token. Agents may only be given token policies
+    /// for registered tokens, and the vault only credits `ft_transfer_call`s
+    /// from registered tokens (others are refunded by the token).
+    /// `min_deposit` (base units, default 1) refuses dust deposits.
+    ///
+    /// The vault must also have storage on the token to receive it: attach
+    /// NEAR (e.g. 0.00125 for the reference implementation) and the vault
+    /// registers itself with `storage_deposit(registration_only)`; or pay the
+    /// registration from any account beforehand.
+    #[payable]
+    pub fn register_token(&mut self, token_id: AccountId, min_deposit: Option<U128>) {
+        self.assert_owner();
+        let min_deposit = min_deposit.map(|m| m.0).unwrap_or(1);
+        require!(min_deposit > 0, "min_deposit must be > 0");
+        match self.tokens.get_mut(&token_id) {
+            Some(token) => token.min_deposit = min_deposit,
+            None => {
+                self.tokens.insert(
+                    token_id.clone(),
+                    TokenAccount {
+                        balance: 0,
+                        min_deposit,
+                    },
+                );
+            }
+        }
+        let attached = env::attached_deposit();
+        if !attached.is_zero() {
+            ext_ft::ext(token_id.clone())
+                .with_attached_deposit(attached)
+                .with_static_gas(GAS_FOR_FT_STORAGE_DEPOSIT)
+                .storage_deposit(Some(env::current_account_id()), Some(true))
+                .detach();
+        }
+        Event::TokenRegistered {
+            token_id,
+            min_deposit: U128(min_deposit),
+        }
+        .emit();
+    }
+
+    /// NEP-141 receiver: tokens sent with `ft_transfer_call` fund the vault.
+    /// Registered tokens are credited and recorded as an `income` receipt
+    /// (`msg` becomes the memo); anything else is handed back to the token,
+    /// which refunds the sender.
+    pub fn ft_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        amount: U128,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        let token_id = env::predecessor_account_id();
+        let Some(min_deposit) = self.tokens.get(&token_id).map(|t| t.min_deposit) else {
+            env::log_str(&format!(
+                "ft_on_transfer: {token_id} is not a token registered with this vault; refunding"
+            ));
+            return PromiseOrValue::Value(amount);
+        };
+        if amount.0 < min_deposit {
+            env::log_str("ft_on_transfer: below the token's min_deposit; refunding");
+            return PromiseOrValue::Value(amount);
+        }
+        self.ft_credit(&token_id, amount.0);
+        let asset = Asset::Ft(token_id);
+        let receipt_id = self.push_receipt(Receipt {
+            id: 0,
+            kind: ReceiptKind::Income,
+            status: ReceiptStatus::Paid,
+            agent: AgentId::Account(sender_id.clone()),
+            payee: env::current_account_id(),
+            amount: NearToken::from_yoctonear(amount.0),
+            asset: asset.clone(),
+            memo: truncate_utf8(&msg, MAX_MEMO_BYTES),
+            request_hash: None,
+            ts_ns: U64(env::block_timestamp()),
+            policy_version: 0,
+            delivered: None,
+            pending_id: None,
+            approved_by: None,
+            storage_deposit: None,
+        });
+        Event::VaultFunded {
+            from: sender_id,
+            amount: NearToken::from_yoctonear(amount.0),
+            asset,
+            receipt_id,
+        }
+        .emit();
+        PromiseOrValue::Value(U128(0))
+    }
+
+    /// Owner: move tokens out of the vault (to the owner unless `to` is
+    /// given; `to` must be registered on the token). Recorded as a `refund`
+    /// receipt that settles as `paid`, or `failed` with the tokens credited
+    /// back.
+    pub fn withdraw_ft(
+        &mut self,
+        token_id: AccountId,
+        amount: U128,
+        to: Option<AccountId>,
+    ) -> Promise {
+        self.assert_owner();
+        require!(amount.0 > 0, "amount must be > 0");
+        let balance = self
+            .tokens
+            .get(&token_id)
+            .map(|t| t.balance)
+            .unwrap_or_else(|| env::panic_str("token not registered"));
+        require!(
+            amount.0 <= balance,
+            "amount exceeds the vault's token balance"
+        );
+        let to = to.unwrap_or_else(|| self.owner_id.clone());
+        self.ft_debit(&token_id, amount.0);
+        let receipt_id = self.push_receipt(Receipt {
+            id: 0,
+            kind: ReceiptKind::Refund,
+            status: ReceiptStatus::Pending,
+            agent: AgentId::Account(self.owner_id.clone()),
+            payee: to.clone(),
+            amount: NearToken::from_yoctonear(amount.0),
+            asset: Asset::Ft(token_id.clone()),
+            memo: String::new(),
+            request_hash: None,
+            ts_ns: U64(env::block_timestamp()),
+            policy_version: 0,
+            delivered: None,
+            pending_id: None,
+            approved_by: None,
+            storage_deposit: None,
+        });
+        let vault = env::current_account_id();
+        ext_ft::ext(token_id)
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_FOR_FT_TRANSFER)
+            .ft_transfer(to, amount, Some(format!("allowance:{vault}#{receipt_id}")))
+            .then(
+                Self::ext(vault)
+                    .with_static_gas(GAS_FOR_PAY_CALLBACK)
+                    .on_ft_withdrawn(receipt_id),
+            )
+    }
+
+    /// Callback of `withdraw_ft`.
+    #[private]
+    pub fn on_ft_withdrawn(&mut self, receipt_id: u64) -> bool {
+        let ok = promise_succeeded();
+        let receipt = self
+            .receipts
+            .get(&receipt_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("receipt missing in callback"));
+        let Asset::Ft(token_id) = &receipt.asset else {
+            env::panic_str("not a token receipt")
+        };
+        if ok {
+            self.update_receipt(receipt_id, |r| r.status = ReceiptStatus::Paid);
+            Event::Withdrawn {
+                to: receipt.payee.clone(),
+                amount: receipt.amount,
+                asset: receipt.asset.clone(),
+                receipt_id,
+            }
+            .emit();
+        } else {
+            self.ft_credit(token_id, receipt.amount.as_yoctonear());
+            self.update_receipt(receipt_id, |r| {
+                r.status = ReceiptStatus::Failed {
+                    reason: Failure::FtTransferFailed,
+                }
+            });
+        }
+        ok
     }
 
     // ------------------------------------------------------------------
@@ -223,9 +433,7 @@ impl Vault {
             "agent already registered"
         );
         require!(label.len() <= MAX_LABEL_BYTES, "label too long");
-        if let Err(msg) = policy.validate() {
-            env::panic_str(&format!("invalid policy: {msg}"));
-        }
+        self.assert_valid_policy(&policy);
         match &agent_id {
             AgentId::Key(pk) => {
                 let allowance = gas_allowance.unwrap_or(self.key_gas_allowance);
@@ -283,9 +491,7 @@ impl Vault {
     /// Returns the new policy version.
     pub fn set_policy(&mut self, agent_id: AgentId, policy: Policy) -> u32 {
         self.assert_owner();
-        if let Err(msg) = policy.validate() {
-            env::panic_str(&format!("invalid policy: {msg}"));
-        }
+        self.assert_valid_policy(&policy);
         let agent = self.agent_mut(&agent_id);
         agent.policy = policy;
         agent.policy_version = agent.policy_version.saturating_add(1);
@@ -480,7 +686,7 @@ impl Vault {
             paused: self.paused,
             agent_active: agent.active,
             payee_denylisted: self.denylist.contains(&pending.payee),
-            vault_available: self.available_balance(),
+            vault_available: self.available_for(&pending.asset),
             approval_granted: true,
         };
         let decision = evaluate(
@@ -506,6 +712,7 @@ impl Vault {
                     agent: pending.agent,
                     payee: pending.payee,
                     amount: pending.amount,
+                    asset: pending.asset,
                     reason: reason.clone(),
                 }
                 .emit();
@@ -531,6 +738,7 @@ impl Vault {
                     pending.receipt_id,
                     pending.payee,
                     pending.amount,
+                    pending.asset,
                 )
             }
         }
@@ -564,7 +772,8 @@ impl Vault {
     // Agent methods (callable with the function-call key)
     // ------------------------------------------------------------------
 
-    /// Agent: pay `amount` of NEAR to `payee` under the caller's policy.
+    /// Agent: pay `amount` of `asset` (default NEAR; the policy's asset) to
+    /// `payee` under the caller's policy.
     ///
     /// Never panics for policy reasons: a refused payment is recorded as a
     /// `rejected` receipt and returned as `{"outcome":"rejected",...}`. A
@@ -576,6 +785,13 @@ impl Vault {
     ///
     /// `request_hash` (32 bytes, base64) lets a payee bind the receipt to a
     /// specific request, see `verify_receipt`.
+    ///
+    /// NEP-141 payments: the vault checks the payee's storage on the token
+    /// (`storage_balance_of`), registers it if the policy's
+    /// `ft_storage_deposit` allows, then calls `ft_transfer` with the memo
+    /// `allowance:<vault>#<receipt id>`. Budget and token balance are
+    /// reserved before the first cross-contract call and released if any step
+    /// fails, exactly like a failed NEAR transfer.
     pub fn pay(
         &mut self,
         payee: AccountId,
@@ -620,7 +836,7 @@ impl Vault {
             paused: self.paused,
             agent_active: active,
             payee_denylisted: self.denylist.contains(&payee),
-            vault_available: self.available_balance(),
+            vault_available: self.available_for(&asset),
             approval_granted: false,
         };
         let decision = evaluate(
@@ -648,6 +864,7 @@ impl Vault {
             delivered: None,
             pending_id: None,
             approved_by: None,
+            storage_deposit: None,
         };
         match decision {
             Err(reason) => {
@@ -660,6 +877,7 @@ impl Vault {
                     agent: agent_id,
                     payee,
                     amount,
+                    asset,
                     reason: reason.clone(),
                 }
                 .emit();
@@ -679,7 +897,7 @@ impl Vault {
                         agent: agent_id.clone(),
                         payee: payee.clone(),
                         amount,
-                        asset,
+                        asset: asset.clone(),
                         memo,
                         request_hash,
                         created_at_ns: U64(now),
@@ -692,6 +910,7 @@ impl Vault {
                     agent: agent_id,
                     payee,
                     amount,
+                    asset,
                     expires_at_ns,
                 }
                 .emit();
@@ -703,13 +922,16 @@ impl Vault {
             }
             Ok(Decision::Pay) => {
                 let receipt_id = self.push_receipt(receipt);
-                self.transfer(agent_id, receipt_id, payee, amount)
+                self.transfer(agent_id, receipt_id, payee, amount, asset)
             }
         }
     }
 
-    /// Callback of the transfer issued by `pay`/`approve`: settles the
-    /// receipt and, on failure, releases the budget reservation.
+    /// Callback of the transfer issued by `pay`/`approve` (a NEAR transfer
+    /// or the token's `ft_transfer`): settles the receipt and, on failure,
+    /// releases the budget reservation and the reserved tokens. Reads the
+    /// promise result itself, so whatever a token returns cannot make the
+    /// settlement panic and leave the receipt pending.
     #[private]
     pub fn on_paid(
         &mut self,
@@ -717,40 +939,35 @@ impl Vault {
         agent_id: AgentId,
         amount: NearToken,
         window_start_ns: U64,
-        #[callback_result] result: Result<(), PromiseError>,
     ) -> PayOutcome {
-        let payee = self
-            .receipts
-            .get(&receipt_id)
-            .map(|r| r.payee.clone())
-            .unwrap_or_else(|| env::panic_str("receipt missing in callback"));
-        match result {
-            Ok(()) => {
-                self.update_receipt(receipt_id, |r| r.status = ReceiptStatus::Paid);
-                Event::PaymentPaid {
-                    receipt_id,
-                    agent: agent_id,
-                    payee,
-                    amount,
-                }
-                .emit();
-                PayOutcome::Paid { receipt_id }
-            }
-            Err(_) => {
-                self.update_receipt(receipt_id, |r| r.status = ReceiptStatus::Failed);
-                if let Some(agent) = self.agents.get_mut(&agent_id) {
-                    agent.state.release(amount, window_start_ns.0);
-                }
-                Event::PaymentFailed {
-                    receipt_id,
-                    agent: agent_id,
-                    payee,
-                    amount,
-                }
-                .emit();
-                PayOutcome::Failed { receipt_id }
-            }
-        }
+        let ok = promise_succeeded();
+        self.settle_payment(receipt_id, agent_id, amount, window_start_ns, ok)
+    }
+
+    /// Callback of the token's `storage_balance_of(payee)` in a NEP-141
+    /// payment: transfer if the payee is registered; otherwise register it
+    /// first if the policy allows (`ft_storage_deposit`), or fail.
+    #[private]
+    pub fn on_ft_storage_checked(
+        &mut self,
+        receipt_id: u64,
+        agent_id: AgentId,
+        amount: NearToken,
+        window_start_ns: U64,
+        ft_storage_deposit: Option<NearToken>,
+    ) -> PromiseOrValue<PayOutcome> {
+        let registered = env::promise_result_checked(0, MAX_TOKEN_RESULT_BYTES)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Option<serde_json::Value>>(&bytes).ok())
+            .map(|balance| balance.is_some());
+        self.ft_transfer_after_storage_check(
+            receipt_id,
+            agent_id,
+            amount,
+            window_start_ns,
+            ft_storage_deposit,
+            registered,
+        )
     }
 
     /// Agent: record whether what it paid for was delivered. Only the agent
@@ -809,7 +1026,9 @@ impl Vault {
     ) -> Simulation {
         let agent_id = agent_id.unwrap_or_else(|| self.caller_agent_id());
         let now = env::block_timestamp();
-        let vault_available = self.available_balance();
+        let asset = asset.unwrap_or_default();
+        // In the asset's unit: NEAR above the storage reserve, or the vault's token balance.
+        let vault_available = self.available_for(&asset);
         let Some(agent) = self.agents.get(&agent_id) else {
             return Simulation {
                 verdict: Verdict::Block,
@@ -822,7 +1041,6 @@ impl Vault {
                 block_timestamp_ns: U64(now),
             };
         };
-        let asset = asset.unwrap_or_default();
         let ctx = EvalContext {
             now_ns: now,
             paused: self.paused,
@@ -860,13 +1078,16 @@ impl Vault {
     }
 
     /// Payee-side check: is receipt `receipt_id` a paid agent payment to
-    /// `payee` of at least `min_amount`, bound to `request_hash` if given?
+    /// `payee` of at least `min_amount` of `asset`, bound to `request_hash` if
+    /// given? `asset` defaults to NEAR, so a payee that prices in NEAR can
+    /// never be fooled by a token receipt with a bigger number.
     pub fn verify_receipt(
         &self,
         receipt_id: u64,
         payee: AccountId,
         min_amount: NearToken,
         request_hash: Option<Base64VecU8>,
+        asset: Option<Asset>,
     ) -> bool {
         let Some(receipt) = self.receipts.get(&receipt_id) else {
             return false;
@@ -874,6 +1095,7 @@ impl Vault {
         receipt.kind == ReceiptKind::Pay
             && receipt.status == ReceiptStatus::Paid
             && receipt.payee == payee
+            && receipt.asset == asset.unwrap_or_default()
             && receipt.amount >= min_amount
             && match request_hash {
                 None => true,
@@ -895,6 +1117,11 @@ impl Vault {
             pending: self.pending.len(),
             approval_ttl_ns: U64(self.approval_ttl_ns),
             key_gas_allowance: self.key_gas_allowance,
+            tokens: self
+                .tokens
+                .iter()
+                .map(|(id, t)| token_view(id, t))
+                .collect(),
             block_timestamp_ns: U64(env::block_timestamp()),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -953,6 +1180,11 @@ impl Vault {
     pub fn get_denylist(&self) -> Vec<AccountId> {
         self.denylist.iter().cloned().collect()
     }
+
+    /// A registered NEP-141 token and the balance the vault accounts for.
+    pub fn get_token(&self, token_id: AccountId) -> Option<TokenView> {
+        self.tokens.get(&token_id).map(|t| token_view(&token_id, t))
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -985,6 +1217,18 @@ impl Vault {
             AgentId::Key(env::signer_account_pk())
         } else {
             AgentId::Account(predecessor)
+        }
+    }
+
+    fn assert_valid_policy(&self, policy: &Policy) {
+        if let Err(msg) = policy.validate() {
+            env::panic_str(&format!("invalid policy: {msg}"));
+        }
+        if let Asset::Ft(token_id) = &policy.asset {
+            require!(
+                self.tokens.contains_key(token_id),
+                "invalid policy: register the token first (register_token)"
+            );
         }
     }
 
@@ -1026,6 +1270,43 @@ impl Vault {
             .saturating_mul(u128::from(env::storage_usage()))
             .saturating_add(STORAGE_HEADROOM);
         env::account_balance().saturating_sub(reserve)
+    }
+
+    /// What the vault can pay in `asset` right now: NEAR above the storage
+    /// reserve, or its accounted token balance.
+    fn available_for(&self, asset: &Asset) -> NearToken {
+        match asset {
+            Asset::Near => self.available_balance(),
+            Asset::Ft(token_id) => {
+                NearToken::from_yoctonear(self.tokens.get(token_id).map(|t| t.balance).unwrap_or(0))
+            }
+        }
+    }
+
+    fn ft_credit(&mut self, token_id: &AccountId, amount: u128) {
+        match self.tokens.get_mut(token_id) {
+            Some(token) => token.balance = token.balance.saturating_add(amount),
+            None => {
+                self.tokens.insert(
+                    token_id.clone(),
+                    TokenAccount {
+                        balance: amount,
+                        min_deposit: 1,
+                    },
+                );
+            }
+        }
+    }
+
+    fn ft_debit(&mut self, token_id: &AccountId, amount: u128) {
+        let token = self
+            .tokens
+            .get_mut(token_id)
+            .unwrap_or_else(|| env::panic_str("token not registered"));
+        token.balance = token
+            .balance
+            .checked_sub(amount)
+            .unwrap_or_else(|| env::panic_str("token balance too low"));
     }
 
     fn push_receipt(&mut self, mut receipt: Receipt) -> u64 {
@@ -1085,30 +1366,219 @@ impl Vault {
         }
     }
 
-    /// Reserve the budget and issue the transfer with its settlement callback.
+    /// Reserve the budget (and, for tokens, the vault's token balance) and
+    /// issue the transfer with its settlement callback.
     fn transfer(
         &mut self,
         agent_id: AgentId,
         receipt_id: u64,
         payee: AccountId,
         amount: NearToken,
+        asset: Asset,
     ) -> PromiseOrValue<PayOutcome> {
         let now = env::block_timestamp();
-        let window_start_ns = {
+        let (window_start_ns, ft_storage_deposit) = {
             let agent = self.agent_mut(&agent_id);
             agent
                 .state
                 .record_payment(agent.policy.budget.as_ref(), amount, now);
-            agent.state.window_start_ns
+            (agent.state.window_start_ns, agent.policy.ft_storage_deposit)
         };
-        PromiseOrValue::Promise(
-            Promise::new(payee).transfer(amount).then(
-                Self::ext(env::current_account_id())
+        let vault = env::current_account_id();
+        let promise = match asset {
+            Asset::Near => Promise::new(payee).transfer(amount).then(
+                Self::ext(vault)
                     .with_static_gas(GAS_FOR_PAY_CALLBACK)
                     .on_paid(receipt_id, agent_id, amount, window_start_ns),
             ),
+            Asset::Ft(token_id) => {
+                self.ft_debit(&token_id, amount.as_yoctonear());
+                ext_ft::ext(token_id)
+                    .with_static_gas(GAS_FOR_FT_STORAGE_CHECK)
+                    .storage_balance_of(payee)
+                    .then(
+                        Self::ext(vault)
+                            .with_static_gas(GAS_FOR_FT_STEP)
+                            .on_ft_storage_checked(
+                                receipt_id,
+                                agent_id,
+                                amount,
+                                window_start_ns,
+                                ft_storage_deposit,
+                            ),
+                    )
+            }
+        };
+        PromiseOrValue::Promise(promise)
+    }
+
+    /// Second step of a NEP-141 payment. `registered` is the payee's NEP-145
+    /// registration on the token (`None`: the check failed or answered
+    /// something that is not NEP-145).
+    fn ft_transfer_after_storage_check(
+        &mut self,
+        receipt_id: u64,
+        agent_id: AgentId,
+        amount: NearToken,
+        window_start_ns: U64,
+        ft_storage_deposit: Option<NearToken>,
+        registered: Option<bool>,
+    ) -> PromiseOrValue<PayOutcome> {
+        let receipt = self
+            .receipts
+            .get(&receipt_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("receipt missing in callback"));
+        let Asset::Ft(token_id) = receipt.asset else {
+            env::panic_str("not a token payment")
+        };
+        let fail = |this: &mut Self, reason| {
+            PromiseOrValue::Value(this.fail_payment(
+                receipt_id,
+                agent_id.clone(),
+                amount,
+                window_start_ns,
+                reason,
+            ))
+        };
+        let Some(registered) = registered else {
+            return fail(self, Failure::StorageCheckFailed);
+        };
+        let vault = env::current_account_id();
+        let transfer = ext_ft::ext(token_id.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(GAS_FOR_FT_TRANSFER)
+            .ft_transfer(
+                receipt.payee.clone(),
+                U128(amount.as_yoctonear()),
+                Some(format!("allowance:{vault}#{receipt_id}")),
+            );
+        let settle = Self::ext(vault)
+            .with_static_gas(GAS_FOR_PAY_CALLBACK)
+            .on_paid(receipt_id, agent_id.clone(), amount, window_start_ns);
+        if registered {
+            return PromiseOrValue::Promise(transfer.then(settle));
+        }
+        let Some(deposit) = ft_storage_deposit else {
+            return fail(self, Failure::PayeeNotRegistered);
+        };
+        if deposit > self.available_balance() {
+            return fail(self, Failure::InsufficientNearForStorage);
+        }
+        self.update_receipt(receipt_id, |r| r.storage_deposit = Some(deposit));
+        Event::FtPayeeRegistration {
+            receipt_id,
+            token_id: token_id.clone(),
+            payee: receipt.payee.clone(),
+            attached: deposit,
+        }
+        .emit();
+        // `then` runs the transfer whatever the registration did; if it
+        // failed, the transfer fails too and `on_paid` releases everything
+        // (the attached NEAR comes back to the vault with the failed call).
+        PromiseOrValue::Promise(
+            ext_ft::ext(token_id)
+                .with_attached_deposit(deposit)
+                .with_static_gas(GAS_FOR_FT_STORAGE_DEPOSIT)
+                .storage_deposit(Some(receipt.payee), Some(true))
+                .then(transfer)
+                .then(settle),
         )
     }
+
+    /// Settle a payment once the transfer (NEAR or `ft_transfer`) finished.
+    fn settle_payment(
+        &mut self,
+        receipt_id: u64,
+        agent_id: AgentId,
+        amount: NearToken,
+        window_start_ns: U64,
+        transferred: bool,
+    ) -> PayOutcome {
+        let receipt = self
+            .receipts
+            .get(&receipt_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("receipt missing in callback"));
+        if !transferred {
+            let reason = match receipt.asset {
+                Asset::Near => Failure::TransferFailed,
+                Asset::Ft(_) => Failure::FtTransferFailed,
+            };
+            return self.fail_payment(receipt_id, agent_id, amount, window_start_ns, reason);
+        }
+        self.update_receipt(receipt_id, |r| r.status = ReceiptStatus::Paid);
+        Event::PaymentPaid {
+            receipt_id,
+            agent: agent_id,
+            payee: receipt.payee,
+            amount,
+            asset: receipt.asset,
+        }
+        .emit();
+        PayOutcome::Paid { receipt_id }
+    }
+
+    /// Mark a payment `failed` and give back what it reserved: the budget
+    /// (in the window it was reserved in) and, for tokens, the vault's
+    /// token balance.
+    fn fail_payment(
+        &mut self,
+        receipt_id: u64,
+        agent_id: AgentId,
+        amount: NearToken,
+        window_start_ns: U64,
+        reason: Failure,
+    ) -> PayOutcome {
+        let receipt = self
+            .receipts
+            .get(&receipt_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("receipt missing in callback"));
+        self.update_receipt(receipt_id, |r| r.status = ReceiptStatus::Failed { reason });
+        if let Some(agent) = self.agents.get_mut(&agent_id) {
+            agent.state.release(amount, window_start_ns.0);
+        }
+        if let Asset::Ft(token_id) = &receipt.asset {
+            self.ft_credit(token_id, amount.as_yoctonear());
+        }
+        Event::PaymentFailed {
+            receipt_id,
+            agent: agent_id,
+            payee: receipt.payee,
+            amount,
+            asset: receipt.asset,
+            reason,
+        }
+        .emit();
+        PayOutcome::Failed { receipt_id, reason }
+    }
+}
+
+/// True unless the promise this callback waits for failed. Reads only the
+/// status (a long or odd return value from a token is not an error).
+fn promise_succeeded() -> bool {
+    !matches!(env::promise_result_checked(0, 0), Err(PromiseError::Failed))
+}
+
+fn token_view(token_id: &AccountId, token: &TokenAccount) -> TokenView {
+    TokenView {
+        token_id: token_id.clone(),
+        balance: U128(token.balance),
+        min_deposit: U128(token.min_deposit),
+    }
+}
+
+/// `text` cut to at most `max` bytes on a character boundary.
+fn truncate_utf8(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 #[cfg(test)]
@@ -1176,6 +1646,7 @@ mod tests {
             cooldown_ns: U64(0),
             approval_threshold: Some(millinear(500)),
             expires_at_ns: None,
+            ft_storage_deposit: None,
         }
     }
 
@@ -1265,23 +1736,29 @@ mod tests {
         let state = vault.get_agent_state(worker()).unwrap();
         assert_eq!(state.spent_in_window, millinear(20));
         assert_eq!(state.payments, 1);
-        assert!(!vault.verify_receipt(1, api(), millinear(20), None));
+        assert!(!vault.verify_receipt(1, api(), millinear(20), None, None));
 
         set_caller(vault_id(), T0 + 1);
-        let settled = vault.on_paid(1, worker(), millinear(20), state.window_start_ns, Ok(()));
+        let settled = vault.settle_payment(1, worker(), millinear(20), state.window_start_ns, true);
         assert_eq!(settled, PayOutcome::Paid { receipt_id: 1 });
-        assert!(vault.verify_receipt(1, api(), millinear(20), Some(hash)));
-        assert!(vault.verify_receipt(1, api(), millinear(10), None));
+        assert!(vault.verify_receipt(1, api(), millinear(20), Some(hash), None));
+        assert!(vault.verify_receipt(1, api(), millinear(10), None, None));
         assert!(
-            !vault.verify_receipt(1, api(), millinear(21), None),
+            !vault.verify_receipt(1, api(), millinear(21), None, None),
             "amount too small"
         );
         assert!(
-            !vault.verify_receipt(1, acc("other.test"), millinear(20), None),
+            !vault.verify_receipt(1, acc("other.test"), millinear(20), None, None),
             "wrong payee"
         );
         assert!(
-            !vault.verify_receipt(1, api(), millinear(20), Some(Base64VecU8(vec![8u8; 32]))),
+            !vault.verify_receipt(
+                1,
+                api(),
+                millinear(20),
+                Some(Base64VecU8(vec![8u8; 32])),
+                None
+            ),
             "wrong request hash"
         );
         assert!(
@@ -1303,7 +1780,7 @@ mod tests {
         set_caller(acc("worker.test"), T0);
         let _ = vault.pay(api(), millinear(20), None, None, None);
         set_caller(vault_id(), T0);
-        vault.on_paid(1, worker(), millinear(20), U64(T0), Ok(()));
+        vault.settle_payment(1, worker(), millinear(20), U64(T0), true);
         set_caller(acc("worker.test"), T0);
         vault.confirm_delivery(1, true);
         vault.confirm_delivery(1, false);
@@ -1316,7 +1793,7 @@ mod tests {
         set_caller(acc("worker.test"), T0);
         let _ = vault.pay(api(), millinear(20), None, None, None);
         set_caller(vault_id(), T0);
-        vault.on_paid(1, worker(), millinear(20), U64(T0), Ok(()));
+        vault.settle_payment(1, worker(), millinear(20), U64(T0), true);
         set_caller(acc("mallory.test"), T0);
         vault.confirm_delivery(1, true);
     }
@@ -1328,20 +1805,24 @@ mod tests {
         let _ = vault.pay(api(), millinear(20), None, None, None);
         let window = vault.get_agent_state(worker()).unwrap().window_start_ns;
         set_caller(vault_id(), T0 + 1);
-        let settled = vault.on_paid(
-            1,
-            worker(),
-            millinear(20),
-            window,
-            Err(PromiseError::Failed),
+        let settled = vault.settle_payment(1, worker(), millinear(20), window, false);
+        let reason = Failure::TransferFailed;
+        assert_eq!(
+            settled,
+            PayOutcome::Failed {
+                receipt_id: 1,
+                reason
+            }
         );
-        assert_eq!(settled, PayOutcome::Failed { receipt_id: 1 });
-        assert_eq!(vault.get_receipt(1).unwrap().status, ReceiptStatus::Failed);
+        assert_eq!(
+            vault.get_receipt(1).unwrap().status,
+            ReceiptStatus::Failed { reason }
+        );
         assert_eq!(
             vault.get_agent_state(worker()).unwrap().spent_in_window,
             near(0)
         );
-        assert!(!vault.verify_receipt(1, api(), millinear(20), None));
+        assert!(!vault.verify_receipt(1, api(), millinear(20), None, None));
         assert!(
             events()
                 .iter()
@@ -1470,12 +1951,12 @@ mod tests {
         );
 
         set_caller(vault_id(), T0 + 61 * NS_PER_SEC);
-        vault.on_paid(
+        vault.settle_payment(
             receipt_id,
             worker(),
             millinear(800),
             U64(T0 - T0 % DAY_NS),
-            Ok(()),
+            true,
         );
         assert_eq!(
             vault.get_receipt(receipt_id).unwrap().status,
@@ -1668,6 +2149,344 @@ mod tests {
         assert!(vault.get_receipt(0).is_none());
         assert!(vault.get_receipt(2).is_some());
         assert_eq!(vault.get_receipts(None, None).len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // NEP-141 payments
+    // ------------------------------------------------------------------
+
+    fn token() -> AccountId {
+        acc("usd.test")
+    }
+    fn usd_worker() -> AgentId {
+        AgentId::Account(acc("usd-worker.test"))
+    }
+    /// A 6-decimal token, like USDC.
+    fn usd(n: u128) -> NearToken {
+        NearToken::from_yoctonear(n * 1_000_000)
+    }
+
+    /// cap 10 USD, 20 USD/day, allow [api], approval above 5 USD, may pay up
+    /// to 0.01 NEAR to register a payee on the token.
+    fn ft_policy() -> Policy {
+        Policy {
+            asset: Asset::Ft(token()),
+            per_tx_cap: usd(10),
+            budget: Some(Budget {
+                amount: usd(20),
+                period_ns: U64(DAY_NS),
+            }),
+            approval_threshold: Some(usd(5)),
+            ft_storage_deposit: Some(millinear(10)),
+            ..policy()
+        }
+    }
+
+    /// Run a callback: the vault calls itself, with one promise result.
+    fn set_callback(builder: VMContextBuilder, result: near_sdk::PromiseResult) {
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![result],
+        );
+    }
+
+    fn ok(bytes: &[u8]) -> near_sdk::PromiseResult {
+        near_sdk::PromiseResult::Successful(bytes.to_vec())
+    }
+
+    /// `vault_with_worker` + the token registered + 100 USD deposited with
+    /// `ft_transfer_call` (receipt #1) + a token agent "usd-worker".
+    fn vault_with_usd_worker() -> Vault {
+        let mut vault = vault_with_worker();
+        set_caller(owner(), T0);
+        vault.register_token(token(), None);
+        set_caller(token(), T0);
+        match vault.ft_on_transfer(owner(), U128(usd(100).as_yoctonear()), "seed".into()) {
+            PromiseOrValue::Value(U128(0)) => {}
+            _ => panic!("the deposit should be kept"),
+        }
+        set_caller(owner(), T0);
+        let _ = vault.add_agent(usd_worker(), "usd".into(), ft_policy(), None);
+        vault
+    }
+
+    fn token_balance(vault: &Vault) -> NearToken {
+        NearToken::from_yoctonear(vault.get_token(token()).unwrap().balance.0)
+    }
+
+    /// The token agent pays `amount` to api; returns the receipt id and the
+    /// budget window the reservation was made in.
+    fn usd_pay(vault: &mut Vault, amount: NearToken) -> (u64, U64) {
+        set_caller(acc("usd-worker.test"), T0);
+        let out = vault.pay(
+            api(),
+            amount,
+            Some(Asset::Ft(token())),
+            Some("candles".into()),
+            None,
+        );
+        assert!(matches!(out, PromiseOrValue::Promise(_)));
+        let id = vault.get_vault().next_receipt_id - 1;
+        let window = vault.get_agent_state(usd_worker()).unwrap().window_start_ns;
+        (id, window)
+    }
+
+    #[test]
+    fn tokens_are_credited_only_from_registered_contracts() {
+        let mut vault = vault_with_worker();
+        set_caller(token(), T0);
+        // Not registered yet: the token is told to refund all of it.
+        assert!(matches!(
+            vault.ft_on_transfer(owner(), U128(5), String::new()),
+            PromiseOrValue::Value(U128(5))
+        ));
+        set_caller(owner(), T0);
+        vault.register_token(token(), Some(U128(1_000)));
+        set_caller(token(), T0);
+        assert!(
+            matches!(
+                vault.ft_on_transfer(owner(), U128(999), String::new()),
+                PromiseOrValue::Value(U128(999))
+            ),
+            "dust below min_deposit is refunded"
+        );
+        assert!(matches!(
+            vault.ft_on_transfer(
+                acc("customer.test"),
+                U128(usd(3).as_yoctonear()),
+                "invoice 7".into()
+            ),
+            PromiseOrValue::Value(U128(0))
+        ));
+        let receipt = vault.get_receipt(1).unwrap();
+        assert_eq!(receipt.kind, ReceiptKind::Income);
+        assert_eq!(receipt.asset, Asset::Ft(token()));
+        assert_eq!(receipt.amount, usd(3));
+        assert_eq!(receipt.agent, AgentId::Account(acc("customer.test")));
+        assert_eq!(receipt.memo, "invoice 7");
+        assert_eq!(token_balance(&vault), usd(3));
+        assert_eq!(vault.get_vault().tokens.len(), 1);
+        assert!(
+            events()
+                .iter()
+                .any(|e| e.contains("\"event\":\"vault_funded\"")
+                    && e.contains("\"ft\":\"usd.test\""))
+        );
+        // Anyone can call ft_on_transfer, but it only ever credits the
+        // caller's own token, and unregistered callers get everything back.
+        set_caller(acc("fake-token.test"), T0);
+        assert!(matches!(
+            vault.ft_on_transfer(owner(), U128(10_000_000), String::new()),
+            PromiseOrValue::Value(U128(10_000_000))
+        ));
+        assert_eq!(token_balance(&vault), usd(3));
+    }
+
+    #[test]
+    #[should_panic(expected = "register the token first")]
+    fn token_policies_need_a_registered_token() {
+        set_caller(owner(), T0);
+        let mut vault = Vault::new(owner(), None, None, None);
+        let _ = vault.add_agent(usd_worker(), "usd".into(), ft_policy(), None);
+    }
+
+    #[test]
+    fn token_payment_to_a_registered_payee() {
+        let mut vault = vault_with_usd_worker();
+        let ft = Asset::Ft(token());
+        set_caller(acc("usd-worker.test"), T0);
+        let sim = vault.simulate(None, api(), usd(2), Some(ft.clone()));
+        assert_eq!(sim.verdict, Verdict::Allow);
+        assert_eq!(sim.vault_available, usd(100), "in token units");
+        assert_eq!(sim.remaining_budget, Some(usd(20)));
+        assert_eq!(
+            vault
+                .simulate(None, api(), usd(6), Some(ft.clone()))
+                .verdict,
+            Verdict::NeedsApproval
+        );
+        assert_eq!(
+            vault.simulate(None, api(), usd(2), None).reason,
+            Some(Rejection::AssetNotAllowed {
+                allowed: ft.clone()
+            }),
+            "a token agent cannot pay NEAR"
+        );
+
+        let (id, window) = usd_pay(&mut vault, usd(2));
+        assert_eq!(id, 2);
+        // Tokens and budget are reserved before any cross-contract call.
+        assert_eq!(token_balance(&vault), usd(98));
+        assert_eq!(
+            vault.get_agent_state(usd_worker()).unwrap().spent_in_window,
+            usd(2)
+        );
+
+        // storage_balance_of(api): registered.
+        set_callback(
+            context(vault_id(), T0 + 1),
+            ok(br#"{"total":"1250000000000000000000","available":"0"}"#),
+        );
+        let next =
+            vault.on_ft_storage_checked(id, usd_worker(), usd(2), window, Some(millinear(10)));
+        assert!(matches!(next, PromiseOrValue::Promise(_)));
+        assert_eq!(vault.get_receipt(id).unwrap().storage_deposit, None);
+
+        // ft_transfer succeeded.
+        set_callback(context(vault_id(), T0 + 2), ok(b""));
+        assert_eq!(
+            vault.on_paid(id, usd_worker(), usd(2), window),
+            PayOutcome::Paid { receipt_id: id }
+        );
+        assert!(vault.verify_receipt(id, api(), usd(2), None, Some(ft.clone())));
+        assert!(
+            !vault.verify_receipt(id, api(), usd(2), None, None),
+            "a token receipt never verifies as a NEAR payment"
+        );
+        assert!(
+            events()
+                .iter()
+                .any(|e| e.contains("\"event\":\"payment_paid\"") && e.contains("usd.test"))
+        );
+        assert_eq!(token_balance(&vault), usd(98));
+    }
+
+    #[test]
+    fn unregistered_payees_are_registered_only_if_the_policy_allows() {
+        let mut vault = vault_with_usd_worker();
+        set_caller(owner(), T0);
+        let mut no_storage = ft_policy();
+        no_storage.ft_storage_deposit = None;
+        vault.set_policy(usd_worker(), no_storage);
+
+        let (id, window) = usd_pay(&mut vault, usd(2));
+        set_callback(context(vault_id(), T0 + 1), ok(b"null"));
+        let reason = Failure::PayeeNotRegistered;
+        match vault.on_ft_storage_checked(id, usd_worker(), usd(2), window, None) {
+            PromiseOrValue::Value(outcome) => assert_eq!(
+                outcome,
+                PayOutcome::Failed {
+                    receipt_id: id,
+                    reason
+                }
+            ),
+            _ => panic!("expected a failure value"),
+        }
+        assert_eq!(
+            vault.get_receipt(id).unwrap().status,
+            ReceiptStatus::Failed { reason }
+        );
+        assert_eq!(token_balance(&vault), usd(100), "tokens released");
+        assert_eq!(
+            vault.get_agent_state(usd_worker()).unwrap().spent_in_window,
+            usd(0),
+            "budget released"
+        );
+        assert!(events().iter().any(|e| e.contains("payee_not_registered")));
+
+        // With ft_storage_deposit the vault registers the payee first.
+        set_caller(owner(), T0);
+        vault.set_policy(usd_worker(), ft_policy());
+        let (id, window) = usd_pay(&mut vault, usd(2));
+        set_callback(context(vault_id(), T0 + 1), ok(b"null"));
+        let next =
+            vault.on_ft_storage_checked(id, usd_worker(), usd(2), window, Some(millinear(10)));
+        assert!(matches!(next, PromiseOrValue::Promise(_)));
+        assert_eq!(
+            vault.get_receipt(id).unwrap().storage_deposit,
+            Some(millinear(10))
+        );
+        assert!(
+            events()
+                .iter()
+                .any(|e| e.contains("\"event\":\"ft_payee_registration\""))
+        );
+        // ...and if the transfer fails after all, everything is released.
+        set_callback(context(vault_id(), T0 + 2), near_sdk::PromiseResult::Failed);
+        let reason = Failure::FtTransferFailed;
+        assert_eq!(
+            vault.on_paid(id, usd_worker(), usd(2), window),
+            PayOutcome::Failed {
+                receipt_id: id,
+                reason
+            }
+        );
+        assert_eq!(token_balance(&vault), usd(100));
+
+        // Not enough NEAR above the storage reserve to register the payee.
+        let (id, window) = usd_pay(&mut vault, usd(2));
+        let poor = {
+            let mut b = context(vault_id(), T0 + 3);
+            b.account_balance(millinear(115)); // reserve is 0.1 + 0.01 NEAR
+            b
+        };
+        set_callback(poor, ok(b"null"));
+        match vault.on_ft_storage_checked(id, usd_worker(), usd(2), window, Some(millinear(10))) {
+            PromiseOrValue::Value(PayOutcome::Failed { reason, .. }) => {
+                assert_eq!(reason, Failure::InsufficientNearForStorage)
+            }
+            _ => panic!("expected a failure value"),
+        }
+        assert_eq!(token_balance(&vault), usd(100));
+    }
+
+    #[test]
+    fn a_broken_storage_check_fails_the_payment_cleanly() {
+        let mut vault = vault_with_usd_worker();
+        for result in [ok(b"not json"), near_sdk::PromiseResult::Failed] {
+            let (id, window) = usd_pay(&mut vault, usd(1));
+            set_callback(context(vault_id(), T0 + 1), result);
+            match vault.on_ft_storage_checked(id, usd_worker(), usd(1), window, Some(millinear(10)))
+            {
+                PromiseOrValue::Value(PayOutcome::Failed { reason, .. }) => {
+                    assert_eq!(reason, Failure::StorageCheckFailed)
+                }
+                _ => panic!("expected a failure value"),
+            }
+        }
+        assert_eq!(token_balance(&vault), usd(100));
+    }
+
+    #[test]
+    fn token_withdrawals_settle_in_a_callback() {
+        let mut vault = vault_with_usd_worker();
+        set_caller(owner(), T0);
+        let _ = vault.withdraw_ft(token(), U128(usd(10).as_yoctonear()), None);
+        assert_eq!(token_balance(&vault), usd(90));
+        let receipt = vault.get_receipt(2).unwrap();
+        assert_eq!(receipt.kind, ReceiptKind::Refund);
+        assert_eq!(receipt.status, ReceiptStatus::Pending);
+        // The owner is not registered on the token: credited back.
+        set_callback(context(vault_id(), T0 + 1), near_sdk::PromiseResult::Failed);
+        assert!(!vault.on_ft_withdrawn(2));
+        assert_eq!(token_balance(&vault), usd(100));
+        assert_eq!(
+            vault.get_receipt(2).unwrap().status,
+            ReceiptStatus::Failed {
+                reason: Failure::FtTransferFailed
+            }
+        );
+        set_caller(owner(), T0 + 2);
+        let _ = vault.withdraw_ft(
+            token(),
+            U128(usd(10).as_yoctonear()),
+            Some(acc("cold.test")),
+        );
+        set_callback(context(vault_id(), T0 + 3), ok(b""));
+        assert!(vault.on_ft_withdrawn(3));
+        assert_eq!(vault.get_receipt(3).unwrap().status, ReceiptStatus::Paid);
+        assert_eq!(token_balance(&vault), usd(90));
+    }
+
+    #[test]
+    #[should_panic(expected = "amount exceeds the vault's token balance")]
+    fn token_withdrawals_cannot_exceed_the_accounted_balance() {
+        let mut vault = vault_with_usd_worker();
+        set_caller(owner(), T0);
+        let _ = vault.withdraw_ft(token(), U128(usd(101).as_yoctonear()), None);
     }
 
     #[test]

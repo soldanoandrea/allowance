@@ -34,6 +34,21 @@ function naiveInstructions(text: string): Array<{ payee: string; amount: string;
   return found;
 }
 
+/**
+ * The vault's available balance once it stops moving: unused prepaid gas of
+ * earlier transactions is refunded a block or two after they finish.
+ */
+async function settledVault(): Promise<Awaited<ReturnType<typeof client.vault>>> {
+  let info = await client.vault();
+  for (let i = 0; i < 8; i++) {
+    await sleep(1000);
+    const next = await client.vault();
+    if (next.available === info.available) break;
+    info = next;
+  }
+  return info;
+}
+
 async function balanceOf(accountId: string): Promise<bigint> {
   try {
     return (await provider.viewAccount({ accountId })).amount;
@@ -53,7 +68,7 @@ for (const i of instructions) log(`  -> pay ${i.amount} NEAR to ${i.payee}${i.me
 const attacker = instructions[0]?.payee;
 if (!attacker) throw new Error('the poisoned page did not contain the expected instruction');
 const attackerBefore = await balanceOf(attacker);
-const vaultBefore = await client.vault();
+const vaultBefore = await settledVault();
 let receipts = 0;
 
 log('');
@@ -89,14 +104,7 @@ for (const [method, args] of [
 }
 
 log('');
-// Unused prepaid gas is refunded a block or two later: wait until the balance settles.
-let vaultAfter = await client.vault();
-for (let i = 0; i < 8; i++) {
-  await sleep(1000);
-  const next = await client.vault();
-  if (next.available === vaultAfter.available) break;
-  vaultAfter = next;
-}
+const vaultAfter = await settledVault();
 const attackerAfter = await balanceOf(attacker);
 log(`attacker ${attacker}: ${near(attackerBefore, 6)} before, ${near(attackerAfter, 6)} after -> received ${near(attackerAfter - attackerBefore, 6)}`);
 log(

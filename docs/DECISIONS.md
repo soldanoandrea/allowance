@@ -171,3 +171,73 @@ design says.
 38. The SDK adds `OwnerClient` and owner CLI commands (not in the feature
     list) because the demo needs `deposit`/`add_agent`/`approve` and the
     video storyboard uses `kill`.
+
+## Stretch features (milestone of 2026-10-31)
+
+### NEP-141 payments
+
+39. **Token amounts reuse `NearToken` on the wire.** Policies, receipts,
+    simulations and events keep their `NearToken` fields (a `u128` as a
+    decimal string); when the asset is `{"ft": "<token>"}` the number is the
+    token's base unit. A parallel amount type would have doubled every
+    struct and broken the ABI the SDK reads, for no difference on the wire.
+    The asset travels next to every amount (`asset` on receipts, pending
+    requests and the 1.1.0 money events).
+40. **The vault keeps its own token accounting** (`tokens: token -> {balance,
+    min_deposit}`): `ft_on_transfer` credits, payments and `withdraw_ft`
+    debit, failures credit back. Reading `ft_balance_of` before each payment
+    was rejected: it is asynchronous, so `simulate` (a view) could not use
+    it, and a pay would need one more callback. Tokens sent with a plain
+    `ft_transfer` are not seen, so the accounting can only under-state.
+41. **Tokens are opt-in**: the owner calls `register_token(token,
+    min_deposit?)` (attached NEAR, if any, registers the vault itself on the
+    token). Token policies for unregistered tokens are refused;
+    `ft_on_transfer` from an unregistered contract or below `min_deposit`
+    returns the full amount (the token refunds the sender), so strangers
+    cannot make the vault pay storage for dust receipts.
+42. **Payment chain**: `storage_balance_of(payee)` -> `on_ft_storage_checked`
+    -> [`storage_deposit(payee, registration_only)`] -> `ft_transfer(payee,
+    amount, memo "allowance:<vault>#<receipt id>")` -> `on_paid`. Budget and
+    token balance are reserved before the first call and released on any
+    failure, exactly like a failed NEAR transfer. `ReceiptStatus::Failed`
+    and `PayOutcome::Failed` now carry a `reason` (`transfer_failed`,
+    `ft_transfer_failed`, `payee_not_registered`,
+    `insufficient_near_for_storage`, `storage_check_failed`): a breaking
+    JSON change for `failed`, acceptable before any deployment.
+43. **"storage_deposit only if the policy allows and within budget"** is
+    read as: `Policy.ft_storage_deposit` is the most NEAR the vault attaches
+    per payment (<= 0.1 NEAR; `None` = never register), it must fit in the
+    vault's NEAR above the storage reserve at that moment, `registration_only`
+    makes the token refund the excess, and the receipt records it
+    (`storage_deposit`) with an `ft_payee_registration` event. That NEAR is
+    not counted in the agent's token budget (another asset); it is bounded
+    by the allowlist, the per-payment cap and the payment budget instead.
+44. **Callbacks read promise results themselves** (`promise_result_checked`
+    with a byte bound) instead of `#[callback_result]` deserialization, so a
+    token that returns something unexpected cannot make the settlement panic
+    and leave a receipt `pending` with budget and tokens reserved. Unit tests
+    drive the callbacks with mocked promise results (`testing_env!` with
+    `promise_results`).
+45. **`verify_receipt(..., asset?)` defaults to NEAR**: a token receipt
+    never verifies against a NEAR price, whatever the numbers.
+46. **One asset per agent policy.** A vault that pays in NEAR and in a token
+    registers two agent keys (the demo's `worker` and `usd-worker`). Mixed
+    budgets would need a price oracle.
+47. **402 quote**: `amount_yocto` became `amount` (base units of `asset`),
+    the counteroffer fields `offered` / `list_price`. The agent refuses a
+    counteroffer answer that changes the asset.
+48. **Test token**: the stock `near-contract-standards` FT (NEP-141, 145,
+    148) in `tests/fixtures/test-token`, a workspace member built by `make
+    build` and by the sandbox test itself (no wasm committed). Its symbol is
+    `SUSD` ("sandbox USD", 6 decimals) rather than USDC, so nothing suggests
+    a real asset.
+49. **Gas**: the SDK attaches 150 TGas to token payments and to `approve`
+    (the sandbox test passes with the default 100); the settlement callback
+    got 10 TGas (was 5).
+50. **Ledger page**: token deposits arrive as `ft_transfer_call`
+    transactions sent to the token, so the block scan (which looks for
+    transactions sent to the vault) does not show their events; the receipts
+    table does. The page reads each token's `ft_metadata` to show symbols.
+51. `make demo` runs the token scenario by default (about 2 s more,
+    `--no-ft` skips it): a second agent buys `/dataset/fx` for 2 SUSD, the
+    vault registers the API on the token, two more checks (9 in total).

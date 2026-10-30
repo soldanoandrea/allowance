@@ -1,5 +1,5 @@
 import type { Policy } from './types.ts';
-import { parseNear } from './units.ts';
+import { parseNear, parseUnits } from './units.ts';
 
 const NS_PER_SEC = 1_000_000_000n;
 const UNITS: Record<string, bigint> = { s: 1n, m: 60n, h: 3_600n, d: 86_400n, w: 604_800n };
@@ -12,7 +12,12 @@ export function parseDuration(text: string): string {
 }
 
 export interface PolicySpec {
-  /** Hard ceiling for one payment, in NEAR ("1"). */
+  /**
+   * Default NEAR. For a NEP-141 token give its contract and decimals; every
+   * amount below (cap, budget, threshold) is then in that token ("2.5").
+   */
+  asset?: { ft: string; decimals: number };
+  /** Hard ceiling for one payment ("1"). */
   perTxCap: string;
   /** Budget per window, e.g. { amount: "2", period: "1d" }. */
   budget?: { amount: string; period: string };
@@ -25,23 +30,27 @@ export interface PolicySpec {
   timeWindow?: { startH: number; endH: number; days?: number[] };
   /** Expiry as a Date. */
   expiresAt?: Date;
+  /** Token policies: NEAR the vault may attach to register a payee on the token ("0.01"). */
+  ftStorageDeposit?: string;
 }
 
 /** Build the contract's `Policy` JSON from human units. */
 export function buildPolicy(spec: PolicySpec): Policy {
+  const units = (amount: string): string => (spec.asset ? parseUnits(amount, spec.asset.decimals) : parseNear(amount)).toString();
   const policy: Policy = {
-    asset: 'near',
-    per_tx_cap: parseNear(spec.perTxCap).toString(),
+    asset: spec.asset ? { ft: spec.asset.ft } : 'near',
+    per_tx_cap: units(spec.perTxCap),
     allow: spec.allow ? { list: spec.allow.map((account_id) => ({ account_id })) } : 'any',
     cooldown_ns: spec.cooldown ? parseDuration(spec.cooldown) : '0',
   };
   if (spec.budget) {
-    policy.budget = { amount: parseNear(spec.budget.amount).toString(), period_ns: parseDuration(spec.budget.period) };
+    policy.budget = { amount: units(spec.budget.amount), period_ns: parseDuration(spec.budget.period) };
   }
-  if (spec.approvalThreshold) policy.approval_threshold = parseNear(spec.approvalThreshold).toString();
+  if (spec.approvalThreshold) policy.approval_threshold = units(spec.approvalThreshold);
   if (spec.timeWindow) {
     policy.time_window = { start_h: spec.timeWindow.startH, end_h: spec.timeWindow.endH, days: spec.timeWindow.days ?? [] };
   }
   if (spec.expiresAt) policy.expires_at_ns = (BigInt(spec.expiresAt.getTime()) * 1_000_000n).toString();
+  if (spec.ftStorageDeposit) policy.ft_storage_deposit = parseNear(spec.ftStorageDeposit).toString();
   return policy;
 }

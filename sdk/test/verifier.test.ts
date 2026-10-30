@@ -54,6 +54,15 @@ describe('ReceiptVerifier (payee side)', () => {
     expect(await v.verify(claim)).toMatchObject({ reason: 'mismatch', detail: expect.stringContaining('rejected') });
   });
 
+  it('NEP-141 prices: the asset goes to verify_receipt, and a receipt in another asset is explained', async () => {
+    rpc.view('verify_receipt', () => false);
+    rpc.view('get_receipt', () => receipt({ asset: 'near' }));
+    const v = new ReceiptVerifier({ rpcUrl: rpc.url, trustedVaults: ['vault.test'] });
+    const res = await v.verify({ ...claim, asset: { ft: 'usd.test' } });
+    expect(rpc.viewCalls[0]?.args).toMatchObject({ asset: { ft: 'usd.test' } });
+    expect(res).toMatchObject({ ok: false, reason: 'mismatch', detail: expect.stringContaining('pays in near, the price is in ft:usd.test') });
+  });
+
   it('waits for a pending receipt to settle, then gives up', async () => {
     let paid = false;
     rpc.view('verify_receipt', () => paid);

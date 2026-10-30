@@ -2,7 +2,8 @@
  * JSON shapes of the Allowance contract (src/types.rs, src/policy.rs,
  * src/events.rs). Conventions of the contract's JSON:
  *
- * - amounts are `NearToken` -> decimal strings of yoctoNEAR (`Yocto`);
+ * - amounts are `NearToken` -> decimal strings of base units (`Yocto`):
+ *   yoctoNEAR, or the token's smallest unit when the asset is `{ft: ...}`;
  * - timestamps ending in `_ns` are `U64` -> decimal strings of nanoseconds
  *   since the epoch (`Ns`), because JSON numbers lose precision above 2^53;
  * - receipt and approval ids are plain JSON numbers (`u64`, small);
@@ -10,7 +11,10 @@
  *   (ReceiptStatus) and `outcome` (PayOutcome).
  */
 
-/** yoctoNEAR as a decimal string (1 NEAR = 10^24 yocto). */
+/**
+ * Base units as a decimal string: yoctoNEAR (1 NEAR = 10^24) for NEAR, the
+ * token's smallest unit for a NEP-141 asset.
+ */
 export type Yocto = string;
 /** Nanoseconds since the Unix epoch as a decimal string. */
 export type Ns = string;
@@ -18,6 +22,7 @@ export type Ns = string;
 /** A function-call key on the vault account, or an agent that owns an account. */
 export type AgentId = { key: string } | { account: string };
 
+/** NEAR, or a NEP-141 token named by its contract account. */
 export type Asset = 'near' | { ft: string };
 
 export interface Budget {
@@ -47,6 +52,8 @@ export interface Policy {
   cooldown_ns?: Ns;
   approval_threshold?: Yocto | null;
   expires_at_ns?: Ns | null;
+  /** NEP-141 policies: NEAR (yocto) the vault may attach to register an unregistered payee on the token. */
+  ft_storage_deposit?: Yocto | null;
 }
 
 export interface SpendState {
@@ -78,7 +85,15 @@ export type ReceiptStatus =
   | { status: 'approved' }
   | { status: 'denied' }
   | { status: 'expired' }
-  | { status: 'failed' };
+  | { status: 'failed'; reason: Failure };
+
+/** Why a payment that passed the policy did not reach the payee (budget and tokens released). */
+export type Failure =
+  | 'transfer_failed'
+  | 'ft_transfer_failed'
+  | 'payee_not_registered'
+  | 'insufficient_near_for_storage'
+  | 'storage_check_failed';
 
 export type ReceiptKind = 'pay' | 'income' | 'refund';
 
@@ -97,6 +112,8 @@ export interface Receipt {
   delivered: boolean | null;
   pending_id: number | null;
   approved_by: string | null;
+  /** NEP-141 payments: NEAR the vault attached to register the payee on the token. */
+  storage_deposit: Yocto | null;
 }
 
 export interface Pending {
@@ -115,7 +132,7 @@ export interface Pending {
 /** Final value of a `pay` (or `approve`) transaction. */
 export type PayOutcome =
   | { outcome: 'paid'; receipt_id: number }
-  | { outcome: 'failed'; receipt_id: number }
+  | { outcome: 'failed'; receipt_id: number; reason: Failure }
   | { outcome: 'needs_approval'; receipt_id: number; pending_id: number; expires_at_ns: Ns }
   | { outcome: 'rejected'; receipt_id: number; reason: Rejection }
   | { outcome: 'expired'; receipt_id: number; pending_id: number };
@@ -147,8 +164,25 @@ export interface VaultInfo {
   pending: number;
   approval_ttl_ns: Ns;
   key_gas_allowance: Yocto;
+  /** NEP-141 tokens the vault accepts, with the balance it accounts for. */
+  tokens: TokenView[];
   block_timestamp_ns: Ns;
   version: string;
+}
+
+export interface TokenView {
+  token_id: string;
+  /** Base units the vault accounts for (credited by ft_on_transfer, debited by payments). */
+  balance: string;
+  min_deposit: string;
+}
+
+/** NEP-148 metadata of a token (the fields the SDK uses). */
+export interface FtMetadata {
+  spec: string;
+  name: string;
+  symbol: string;
+  decimals: number;
 }
 
 export interface AgentView {

@@ -29,6 +29,8 @@ export interface CallOptions {
 export interface VaultTransport {
   readonly vaultId: string;
   view<T>(method: string, args?: Record<string, unknown>): Promise<T>;
+  /** View on another contract (e.g. a token's `ft_metadata`). Optional: fakes may omit it. */
+  viewContract?<T>(contractId: string, method: string, args?: Record<string, unknown>): Promise<T>;
   call(method: string, args: Record<string, unknown>, options?: CallOptions): Promise<CallResult>;
   /** Public key of the signing key, if any (`ed25519:...`). */
   signerPublicKey(): string | undefined;
@@ -50,6 +52,12 @@ export interface NearTransportOptions {
 }
 
 export const DEFAULT_GAS = 100_000_000_000_000n;
+/**
+ * NEP-141 payments (and approvals of them) chain storage_balance_of ->
+ * [storage_deposit] -> ft_transfer -> settlement: give them more room.
+ * Unused gas is refunded; the key's allowance is only a ceiling.
+ */
+export const FT_PAY_GAS = 150_000_000_000_000n;
 
 export class NearTransport implements VaultTransport {
   readonly vaultId: string;
@@ -74,10 +82,14 @@ export class NearTransport implements VaultTransport {
     return this.#publicKey;
   }
 
-  async view<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {
+  view<T>(method: string, args: Record<string, unknown> = {}): Promise<T> {
+    return this.viewContract<T>(this.vaultId, method, args);
+  }
+
+  async viewContract<T>(contractId: string, method: string, args: Record<string, unknown> = {}): Promise<T> {
     try {
       const value = await this.provider.callFunction<never>({
-        contractId: this.vaultId,
+        contractId,
         method,
         args,
         blockQuery: { finality: this.#finality },

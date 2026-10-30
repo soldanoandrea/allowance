@@ -26,7 +26,12 @@ function loadLedger(handler: (method: string, params: Record<string, unknown>) =
 }
 
 interface LedgerApi {
-  loadSnapshot(url: string, vault: string): Promise<{ vault: { next_receipt_id: number }; receipts: Array<{ id: number }>; agents: unknown[] }>;
+  loadSnapshot(
+    url: string,
+    vault: string,
+  ): Promise<{ vault: { next_receipt_id: number }; receipts: Array<{ id: number }>; agents: unknown[]; tokens: Record<string, unknown> }>;
+  formatAmount(amount: string, asset?: unknown): string;
+  setTokens(tokens: Record<string, unknown>): void;
   scanEvents(url: string, vault: string, state: ScanState, opts?: Record<string, unknown>): Promise<ScanState>;
   formatNear(yocto: string): string;
   describePolicy(policy: unknown): string[];
@@ -45,6 +50,26 @@ function viewResult(value: unknown) {
 }
 
 describe('ledger page data layer (ledger/core.js)', () => {
+  it('reads NEP-141 metadata for the vault tokens and formats amounts per asset', async () => {
+    const { L } = loadLedger((_method, params) => {
+      const name = params['method_name'];
+      if (name === 'get_vault') return viewResult({ first_receipt_id: 0, next_receipt_id: 0, tokens: [{ token_id: 'usd.test', balance: '98000000', min_deposit: '1' }] });
+      if (name === 'ft_metadata') {
+        expect(params['account_id']).toBe('usd.test');
+        return viewResult({ spec: 'ft-1.0.0', name: 'x', symbol: 'SUSD', decimals: 6 });
+      }
+      return viewResult([]);
+    });
+    const snap = await L.loadSnapshot('http://rpc', 'vault.test');
+    expect(snap.tokens).toEqual({ 'usd.test': { symbol: 'SUSD', decimals: 6 } });
+    L.setTokens(snap.tokens);
+    expect(L.formatAmount('2500000', { ft: 'usd.test' })).toBe('2.5 SUSD');
+    expect(L.formatAmount('5', { ft: 'other.test' })).toBe('5 other.test units');
+    expect(L.formatAmount('20000000000000000000000', 'near')).toBe('0.02 NEAR');
+    expect(L.describeEvent({ event: 'payment_paid', data: { receipt_id: 5, amount: '2000000', asset: { ft: 'usd.test' }, payee: 'api.test' } })).toBe('#5 2 SUSD -> api.test');
+    expect(L.describePolicy({ asset: { ft: 'usd.test' }, per_tx_cap: '10000000', allow: 'any' })[1]).toBe('cap 10 SUSD per payment');
+  });
+
   it('loads the vault snapshot and pages receipts', async () => {
     const { L, calls } = loadLedger((method, params) => {
       expect(method).toBe('query');

@@ -1,0 +1,20 @@
+[package]
+name = "test-token"
+description = "Minimal NEP-141 + NEP-145 fungible token used only by the Allowance tests and the local demo (sandbox)"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+repository = "https://github.com/soldanoandrea/allowance"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "5.30.0"
+near-contract-standards = "5.30.0"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(near)']

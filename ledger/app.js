@@ -45,7 +45,7 @@
     var s = status.status;
     if (s === 'paid') return badge('paid', 'ok');
     if (s === 'rejected') return badge('rejected: ' + status.reason.code, 'bad');
-    if (s === 'failed') return badge('failed', 'bad');
+    if (s === 'failed') return badge('failed: ' + status.reason, 'bad');
     if (s === 'pending' || s === 'approved') return badge(s, 'warn');
     return badge(s);
   }
@@ -88,14 +88,18 @@
 
   function renderStats(s) {
     var v = s.vault;
+    var tokenStats = (v.tokens || []).map(function (t) {
+      return stat('Token ' + t.token_id, L.formatAmount(t.balance, { ft: t.token_id }), 'NEP-141, accounted by the vault');
+    });
     return h('section', null, [
       h('div', { class: 'stats' }, [
         stat('Available to pay', L.formatNear(v.available), 'balance ' + L.formatNear(v.balance) + ' incl. storage'),
+      ].concat(tokenStats, [
         stat('Status', v.paused ? 'Paused' : 'Running', 'owner ' + v.owner_id + (v.approver_id ? ', approver ' + v.approver_id : '')),
         stat('Agents', String(v.agents), 'key gas allowance ' + L.formatNear(v.key_gas_allowance)),
         stat('Receipts', String(v.next_receipt_id), v.first_receipt_id ? 'oldest kept #' + v.first_receipt_id : 'none pruned'),
         stat('Pending approvals', String(v.pending), 'expire after ' + L.duration(v.approval_ttl_ns)),
-      ]),
+      ])),
     ]);
   }
 
@@ -111,7 +115,7 @@
         var pct = total > 0n ? Number(((total - left) * 1000n) / total) / 10 : 0;
         meter = h('div', null, [
           h('div', { class: 'meter' }, [h('div', { style: 'width:' + Math.min(100, pct) + '%' })]),
-          h('div', { class: 'muted', text: L.formatNear(total - left) + ' spent, ' + L.formatNear(left) + ' left, resets ' + L.isoFromNs(a.budget_resets_at_ns) + ' UTC' }),
+          h('div', { class: 'muted', text: L.formatAmount(total - left, a.policy.asset) + ' spent, ' + L.formatAmount(left, a.policy.asset) + ' left, resets ' + L.isoFromNs(a.budget_resets_at_ns) + ' UTC' }),
         ]);
       }
       return h('div', { class: 'agent' }, [
@@ -130,7 +134,7 @@
       ? table(['Request', 'Receipt', 'Payee', 'Amount', 'Memo', 'Expires'], s.pending.map(function (p) {
           var left = BigInt(p.expires_at_ns) - now;
           return h('tr', null, [
-            td('#' + p.id), td('#' + p.receipt_id), td(p.payee), td(L.formatNear(p.amount), 'num'), td(p.memo, 'wrap'),
+            td('#' + p.id), td('#' + p.receipt_id), td(p.payee), td(L.formatAmount(p.amount, p.asset), 'num'), td(p.memo, 'wrap'),
             td(left > 0n ? 'in ' + L.duration(left.toString()) : badge('expired', 'bad')),
           ]);
         }), [3])
@@ -149,7 +153,7 @@
       return h('tr', null, [
         td('#' + r.id), td(L.isoFromNs(r.ts_ns).slice(5)), td(r.kind), status,
         td(h('span', { class: 'mono', title: r.agent.key || r.agent.account || '', text: L.describeAgent(r.agent) })),
-        td(r.payee), td(L.formatNear(r.amount), 'num'), td(delivered), td(r.memo, 'wrap'),
+        td(r.payee), td(L.formatAmount(r.amount, r.asset), 'num'), td(delivered), td(r.memo, 'wrap'),
       ]);
     });
     return section('Receipts (newest first)', [table(['Id', 'Time (UTC)', 'Kind', 'Status', 'Agent', 'Payee', 'Amount', 'Delivered', 'Memo'], rows, [6])]);
@@ -175,6 +179,7 @@
     timer = null;
     try {
       var snapshot = await L.loadSnapshot(rpcUrl, vaultId);
+      L.setTokens(snapshot.tokens);
       var scanError = null;
       try {
         await L.scanEvents(rpcUrl, vaultId, scanState, { windowBlocks: windowBlocks });

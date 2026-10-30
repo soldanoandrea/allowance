@@ -1,7 +1,9 @@
 import { KeyPair, type KeyPairString } from 'near-api-js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { formatAmount } from '../src/asset.ts';
 import { AllowanceClient } from '../src/client.ts';
+import { DEFAULT_GAS, FT_PAY_GAS } from '../src/transport.ts';
 import { AllowanceError, toAllowanceError } from '../src/errors.ts';
 import { requestHash } from '../src/hash.ts';
 import { OwnerClient } from '../src/owner.ts';
@@ -119,6 +121,34 @@ describe('AllowanceClient (agent side, over a mocked JSON-RPC node)', () => {
     expect(seen).toEqual(['pending', 'approved', 'paid']);
   });
 
+  it('NEP-141: simulate, pay and verify carry the asset; pay gets the token gas budget', async () => {
+    const usd = { ft: 'usd.test' } as const;
+    rpc.view('simulate', () => ({ verdict: 'allow', reason: null }));
+    rpc.view('verify_receipt', () => true);
+    rpc.onTx = () => ({ value: { outcome: 'failed', receipt_id: 9, reason: 'payee_not_registered' } });
+    const client = agentClient();
+    await client.simulate('api.test', 2_000_000n, { asset: usd });
+    expect(rpc.viewCalls[0]?.args).toMatchObject({ asset: usd, amount: '2000000' });
+    const res = await client.pay({ payee: 'api.test', amount: 2_000_000n, asset: usd });
+    expect(res.outcome).toEqual({ outcome: 'failed', receipt_id: 9, reason: 'payee_not_registered' });
+    expect(rpc.sent[0]?.args).toEqual({ payee: 'api.test', amount: '2000000', asset: usd });
+    expect(rpc.sent[0]?.gas).toBe(FT_PAY_GAS);
+    expect(await client.verifyReceipt({ receiptId: 9, payee: 'api.test', minAmount: 2_000_000n, asset: usd })).toBe(true);
+    expect(rpc.viewCalls[1]?.args).toMatchObject({ asset: usd });
+    // NEAR stays the contract's default: no asset argument, default gas.
+    await client.pay({ payee: 'api.test', amount: 1n });
+    expect(rpc.sent[1]?.args).not.toHaveProperty('asset');
+    expect(rpc.sent[1]?.gas).toBe(DEFAULT_GAS);
+  });
+
+  it('reads token metadata from the token contract and learns how to show it', async () => {
+    rpc.view('ft_metadata', (_args, accountId) => ({ spec: 'ft-1.0.0', name: 'x', symbol: accountId === 'usd.test' ? 'SUSD' : '?', decimals: 6 }));
+    const meta = await agentClient().ftMetadata('usd.test');
+    expect(meta.symbol).toBe('SUSD');
+    expect(rpc.viewCalls[0]).toMatchObject({ accountId: 'usd.test', method: 'ft_metadata' });
+    expect(formatAmount('1500000', { ft: 'usd.test' })).toBe('1.5 SUSD');
+  });
+
   it('waitForSettlement times out', async () => {
     rpc.view('get_receipt', () => ({ id: 3, status: { status: 'pending' } }));
     await expect(new AllowanceClient({ vaultId: 'vault.test', rpcUrl: rpc.url }).waitForSettlement(3, { timeoutMs: 5, intervalMs: 2 })).rejects.toThrow(/still pending/);
@@ -136,6 +166,19 @@ describe('OwnerClient', () => {
     expect(rpc.sent.map((t) => [t.signerId, t.receiverId, t.methodName, t.deposit])).toEqual([
       ['owner.test', 'vault.test', 'deposit', parseNear('5')],
       ['owner.test', 'vault.test', 'approve', 0n],
+    ]);
+    expect(rpc.sent[1]?.gas).toBe(FT_PAY_GAS);
+  });
+
+  it('registers tokens (attaching the vault storage) and withdraws them', async () => {
+    const ownerKey = KeyPair.fromRandom('ed25519');
+    rpc.onTx = () => ({ value: null });
+    const owner = new OwnerClient({ vaultId: 'vault.test', ownerId: 'owner.test', rpcUrl: rpc.url, ownerKey: ownerKey.toString() as KeyPairString });
+    await owner.registerToken('usd.test', { minDeposit: 1000n, attachYocto: parseNear('0.01') });
+    await owner.withdrawFt('usd.test', 5_000_000n, 'cold.test');
+    expect(rpc.sent.map((t) => [t.methodName, t.args, t.deposit])).toEqual([
+      ['register_token', { token_id: 'usd.test', min_deposit: '1000' }, parseNear('0.01')],
+      ['withdraw_ft', { token_id: 'usd.test', amount: '5000000', to: 'cold.test' }, 0n],
     ]);
   });
 });

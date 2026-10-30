@@ -1,8 +1,9 @@
 import { JsonRpcProvider } from 'near-api-js';
 
+import { assetLabel, sameAsset, tokenOf } from './asset.ts';
 import { sleep } from './client.ts';
 import { requestHash } from './hash.ts';
-import type { Receipt } from './types.ts';
+import type { Asset, Receipt } from './types.ts';
 
 export interface VerifierOptions {
   rpcUrl: string;
@@ -26,8 +27,10 @@ export interface ReceiptClaim {
   receiptId: number;
   /** The server's own account: the receipt must pay it. */
   payee: string;
-  /** Price quoted for this nonce (yocto). */
+  /** Price quoted for this nonce (base units of `asset`). */
   minAmount: bigint;
+  /** Asset the price is in (default NEAR): a receipt in another asset never verifies. */
+  asset?: Asset;
   /** Nonce the server issued; the receipt must carry sha256(nonce). */
   nonce: string;
 }
@@ -96,6 +99,7 @@ export class ReceiptVerifier {
         payee: claim.payee,
         min_amount: claim.minAmount.toString(),
         request_hash: requestHash(claim.nonce),
+        ...(tokenOf(claim.asset) === null ? {} : { asset: claim.asset }),
       },
       blockQuery: { finality: this.#finality },
     });
@@ -125,7 +129,10 @@ export class ReceiptVerifier {
     }
     if (status !== 'paid') return { ok: false, reason: 'mismatch', detail: `receipt #${claim.receiptId} is ${status}` };
     if (receipt.payee !== claim.payee) return { ok: false, reason: 'mismatch', detail: `receipt #${claim.receiptId} pays ${receipt.payee}, not ${claim.payee}` };
-    if (BigInt(receipt.amount) < claim.minAmount) return { ok: false, reason: 'mismatch', detail: `receipt #${claim.receiptId} pays ${receipt.amount} yocto, price is ${claim.minAmount}` };
+    if (!sameAsset(receipt.asset ?? 'near', claim.asset)) {
+      return { ok: false, reason: 'mismatch', detail: `receipt #${claim.receiptId} pays in ${assetLabel(receipt.asset)}, the price is in ${assetLabel(claim.asset)}` };
+    }
+    if (BigInt(receipt.amount) < claim.minAmount) return { ok: false, reason: 'mismatch', detail: `receipt #${claim.receiptId} pays ${receipt.amount} base units, price is ${claim.minAmount}` };
     return { ok: false, reason: 'mismatch', detail: `receipt #${claim.receiptId} is bound to a different request (request_hash)` };
   }
 }

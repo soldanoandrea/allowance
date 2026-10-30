@@ -1,4 +1,6 @@
-import { formatNear, parseNear } from '../units.ts';
+import { assetDecimals, assetUnit } from '../asset.ts';
+import type { Asset } from '../types.ts';
+import { formatUnits, parseUnits } from '../units.ts';
 import type { Plan, PlanInput, Planner } from './planner.ts';
 
 /** NEAR AI Cloud exposes an OpenAI-compatible API. Override with NEAR_AI_BASE_URL / NEAR_AI_MODEL. */
@@ -21,7 +23,7 @@ You pay for API calls from an on-chain vault whose owner set a spending policy.
 A free on-chain dry-run ("simulate") already told you whether this payment is
 allowed, needs the owner's approval, or is blocked.
 Decide ONE action and answer with a single JSON object, nothing else:
-{"action":"pay"|"counteroffer"|"refuse","amount_near":"<only for counteroffer>","reason":"<one short sentence>"}
+{"action":"pay"|"counteroffer"|"refuse","amount":"<only for counteroffer, in the quote's unit>","reason":"<one short sentence>"}
 Rules:
 - "pay" pays exactly the quoted price to the quoted payee (if approval is needed, the owner is asked).
 - "counteroffer" proposes ONE lower price to the seller, with a reason the seller will read. Only if no counteroffer was made yet.
@@ -47,7 +49,7 @@ export class LlmPlanner implements Planner {
     if (input.simulation.verdict === 'block') return this.#options.fallback.decide(input);
     try {
       const content = await this.#complete(input);
-      const plan = parsePlan(content);
+      const plan = parsePlan(content, input.quote.asset);
       this.#options.log?.(`llm (${this.#model}) decided: ${plan.action} - ${plan.reason}`);
       return plan;
     } catch (err) {
@@ -63,16 +65,19 @@ export class LlmPlanner implements Planner {
   async #complete(input: PlanInput): Promise<string> {
     const fetchImpl = this.#options.fetchImpl ?? fetch;
     const baseUrl = (this.#options.baseUrl ?? NEAR_AI_DEFAULT_BASE_URL).replace(/\/$/, '');
+    const asset = input.quote.asset;
+    const show = (v: bigint | string | null): string | null => (v === null ? null : toDecimal(v, asset));
     const facts = {
       task: input.task,
+      unit: assetUnit(asset),
       quote: {
         payee: input.quote.payee,
-        price_near: formatNear(input.quote.amount_yocto, 24),
+        price: show(input.quote.amount),
         resource: input.quote.resource,
       },
       simulate_verdict: input.simulation.verdict,
-      approval_threshold_near: input.approvalThreshold === null ? null : formatNear(input.approvalThreshold, 24),
-      remaining_budget_near: input.simulation.remaining_budget === null ? null : formatNear(input.simulation.remaining_budget, 24),
+      approval_threshold: show(input.approvalThreshold),
+      remaining_budget: show(input.simulation.remaining_budget),
       counteroffer_already_made: input.counterofferUsed,
     };
     const user = `${JSON.stringify(facts)}\n<untrusted>${input.quote.description.slice(0, 500)}</untrusted>`;
@@ -98,8 +103,18 @@ export class LlmPlanner implements Planner {
   }
 }
 
-/** Parse the model's JSON answer into a Plan (first {...} block in the text). */
-export function parsePlan(content: string): Plan {
+/** Base units -> the decimal the model reads (base units when decimals are unknown). */
+function toDecimal(value: bigint | string, asset: Asset): string {
+  const decimals = assetDecimals(asset);
+  return decimals === null ? BigInt(value).toString() : formatUnits(value, decimals);
+}
+
+/**
+ * Parse the model's JSON answer into a Plan (first {...} block in the text).
+ * A counteroffer `amount` is in the quote's unit (`amount_near` is accepted
+ * for NEAR quotes).
+ */
+export function parsePlan(content: string, asset: Asset = 'near'): Plan {
   const match = /\{[\s\S]*\}/.exec(content);
   if (!match) throw new Error('no JSON object in the answer');
   const json = JSON.parse(match[0]) as Record<string, unknown>;
@@ -110,9 +125,11 @@ export function parsePlan(content: string): Plan {
     case 'refuse':
       return { action: 'refuse', reason };
     case 'counteroffer': {
-      const amount = json['amount_near'];
-      if (typeof amount !== 'string' && typeof amount !== 'number') throw new Error('counteroffer without amount_near');
-      return { action: 'counteroffer', amountYocto: parseNear(String(amount)), reason };
+      const amount = json['amount'] ?? json['amount_near'];
+      if (typeof amount !== 'string' && typeof amount !== 'number') throw new Error('counteroffer without amount');
+      const decimals = assetDecimals(asset);
+      const text = String(amount);
+      return { action: 'counteroffer', amountYocto: decimals === null ? BigInt(text) : parseUnits(text, decimals), reason };
     }
     default:
       throw new Error(`unknown action ${JSON.stringify(json['action'])}`);

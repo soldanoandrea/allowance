@@ -4,7 +4,7 @@
  * matching `Verifier` for the demo API. Lets the agent loop, the API and the
  * CLI be tested together without a chain.
  */
-import { requestHash, type CallResult, type ReceiptClaim, type VaultTransport, type VerifyResult } from '../../src/index.ts';
+import { requestHash, sameAsset, type CallResult, type ReceiptClaim, type VaultTransport, type VerifyResult } from '../../src/index.ts';
 import type { PayOutcome, Receipt, Rejection, Simulation } from '../../src/types.ts';
 
 export const AGENT_PK = 'ed25519:8hSHprDq2StXwMtNd43wDTXQYsjXcD4MJTXQYsjXcD4M';
@@ -84,7 +84,7 @@ export class FakeVault implements VaultTransport {
         agent: { key: AGENT_PK },
         payee,
         amount: amount.toString(),
-        asset: 'near',
+        asset: (args['asset'] as Receipt['asset'] | undefined) ?? 'near',
         memo: String(args['memo'] ?? ''),
         request_hash: (args['request_hash'] as string | undefined) ?? null,
         ts_ns: '1793391009000000000',
@@ -92,6 +92,7 @@ export class FakeVault implements VaultTransport {
         delivered: null,
         pending_id: null,
         approved_by: null,
+        storage_deposit: null,
       };
       let outcome: PayOutcome;
       if (verdict === 'block') {
@@ -126,6 +127,7 @@ export class FakeVault implements VaultTransport {
       r.kind === 'pay' &&
       r.status.status === 'paid' &&
       r.payee === claim.payee &&
+      sameAsset(r.asset, claim.asset ?? 'near') &&
       BigInt(r.amount) >= claim.minAmount &&
       r.request_hash === requestHash(claim.nonce)
     );

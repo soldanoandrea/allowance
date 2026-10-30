@@ -14,9 +14,12 @@ const SECS_PER_DAY: u64 = 86_400;
 /// 1970-01-01 was a Thursday: ISO weekday 4.
 const EPOCH_ISO_WEEKDAY: u64 = 4;
 
-/// Asset a policy is denominated in. Only `Near` is payable in this version;
-/// `Ft` is reserved for NEP-141 payments (stretch goal) and is rejected by
-/// [`Policy::validate`].
+/// Asset a policy is denominated in: NEAR, or a NEP-141 fungible token
+/// named by its contract account (`{"ft": "usdc.near"}`).
+///
+/// Every amount of a policy, a receipt or a simulation is a `NearToken` on the
+/// wire (a decimal string of a `u128`). For `Near` it is yoctoNEAR; for `Ft` it
+/// is the token's smallest unit (e.g. 1 USDC = `"1000000"` with 6 decimals).
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -55,8 +58,8 @@ impl Budget {
     }
 }
 
-/// One allowlisted payee. `methods` is reserved for function-call payments
-/// (NEP-141 `ft_transfer`, stretch goal); it is ignored for plain NEAR transfers.
+/// One allowlisted payee. `methods` is reserved for function-call payments and
+/// ignored for plain NEAR transfers and NEP-141 `ft_transfer`s.
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowEntry {
@@ -151,7 +154,7 @@ pub fn utc_hour_and_weekday(now_ns: u64) -> (u8, u8) {
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {
-    /// Asset the limits are denominated in (only `near` is payable today).
+    /// Asset the limits are denominated in and payments are made in.
     #[serde(default)]
     pub asset: Asset,
     /// Hard ceiling for a single payment, approved or not.
@@ -175,14 +178,33 @@ pub struct Policy {
     /// The policy stops working at this instant (`None` = never).
     #[serde(default)]
     pub expires_at_ns: Option<U64>,
+    /// NEP-141 policies only: the most NEAR the vault may attach, per payment,
+    /// to register a payee that has no storage on the token (NEP-145
+    /// `storage_deposit` with `registration_only`, so the token refunds what
+    /// it does not need). `None` = never: paying an unregistered payee fails
+    /// and the reservation is released. Paid from the vault's NEAR balance
+    /// above the storage reserve; at most [`MAX_FT_STORAGE_DEPOSIT`].
+    #[serde(default)]
+    pub ft_storage_deposit: Option<NearToken>,
 }
+
+/// Upper bound for [`Policy::ft_storage_deposit`]. NEP-145 registrations cost
+/// about 0.00125 NEAR on the reference token; 0.1 NEAR leaves room for tokens
+/// with bigger accounts and keeps a compromised agent from turning payee
+/// registrations into a NEAR drain.
+pub const MAX_FT_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(100);
 
 impl Policy {
     /// Check that the policy is internally consistent. Called by `add_agent`
     /// and `set_policy`; the message is meant for the owner.
     pub fn validate(&self) -> Result<(), String> {
-        if self.asset != Asset::Near {
-            return Err("asset: only `near` is supported in this version".into());
+        if let Some(deposit) = self.ft_storage_deposit {
+            if self.asset == Asset::Near {
+                return Err("ft_storage_deposit only applies to `ft` assets".into());
+            }
+            if deposit.is_zero() || deposit > MAX_FT_STORAGE_DEPOSIT {
+                return Err("ft_storage_deposit must be > 0 and <= 0.1 NEAR".into());
+            }
         }
         if self.per_tx_cap.is_zero() {
             return Err("per_tx_cap must be greater than zero".into());
@@ -478,6 +500,7 @@ mod tests {
             cooldown_ns: U64(0),
             approval_threshold: Some(millinear(500)),
             expires_at_ns: None,
+            ft_storage_deposit: None,
         }
     }
 
@@ -881,8 +904,70 @@ mod tests {
         assert!(p.validate().unwrap_err().contains("days"));
 
         let mut p = policy();
+        p.ft_storage_deposit = Some(millinear(10));
+        assert!(
+            p.validate().unwrap_err().contains("ft_storage_deposit"),
+            "registration deposits only make sense for tokens"
+        );
+
+        let mut p = policy();
         p.asset = Asset::Ft("usdc.near".parse().unwrap());
-        assert!(p.validate().unwrap_err().contains("asset"));
+        assert!(p.validate().is_ok(), "NEP-141 policies are accepted");
+        p.ft_storage_deposit = Some(millinear(101));
+        assert!(p.validate().unwrap_err().contains("ft_storage_deposit"));
+        p.ft_storage_deposit = Some(millinear(10));
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn ft_policies_evaluate_in_token_units() {
+        let token: AccountId = "usdc.near".parse().unwrap();
+        let usdc = |n: u128| NearToken::from_yoctonear(n * 1_000_000);
+        let mut p = policy();
+        p.asset = Asset::Ft(token.clone());
+        p.per_tx_cap = usdc(10);
+        p.approval_threshold = Some(usdc(5));
+        p.budget = Some(Budget {
+            amount: usdc(20),
+            period_ns: U64(DAY_NS),
+        });
+        let mut c = ctx(MONDAY);
+        // For a token policy the caller passes the vault's token balance.
+        c.vault_available = usdc(100);
+        let pay = |amount: NearToken, asset: &Asset, c: &EvalContext| {
+            evaluate(
+                &p,
+                &SpendState::default(),
+                &PayRequest {
+                    payee: &api(),
+                    amount,
+                    asset,
+                },
+                c,
+            )
+        };
+        let ft = Asset::Ft(token);
+        assert_eq!(pay(usdc(2), &ft, &c), Ok(Decision::Pay));
+        assert_eq!(
+            pay(usdc(6), &ft, &c),
+            Ok(Decision::NeedsApproval { threshold: usdc(5) })
+        );
+        assert_eq!(
+            pay(usdc(11), &ft, &c),
+            Err(Rejection::OverPerTxCap { cap: usdc(10) })
+        );
+        assert_eq!(
+            pay(usdc(2), &Asset::Near, &c),
+            Err(Rejection::AssetNotAllowed {
+                allowed: ft.clone()
+            }),
+            "a token policy never pays NEAR"
+        );
+        c.vault_available = usdc(1);
+        assert_eq!(
+            pay(usdc(2), &ft, &c),
+            Err(Rejection::InsufficientVaultBalance { available: usdc(1) })
+        );
     }
 
     #[test]

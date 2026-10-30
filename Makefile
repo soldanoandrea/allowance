@@ -5,9 +5,12 @@
 # Contract (Rust)
 # ----------------------------------------------------------------------
 
-# Compile the contract to target/near/allowance.wasm (no Docker needed).
+# Compile the contract to target/near/allowance.wasm (no Docker needed), and
+# the NEP-141 test token used by the tests and the demo to
+# target/near/test_token/test_token.wasm.
 build:
 	cargo near build non-reproducible-wasm
+	cargo near build non-reproducible-wasm --no-abi --manifest-path tests/fixtures/test-token/Cargo.toml
 
 # Everything Rust: unit tests of the policy core and contract, then sandbox
 # tests (they compile the wasm themselves and download neard-sandbox on

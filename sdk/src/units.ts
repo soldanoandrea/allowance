@@ -1,5 +1,6 @@
 /**
- * Exact NEAR <-> yoctoNEAR conversions on bigint (no floating point).
+ * Exact decimal <-> base-unit conversions on bigint (no floating point):
+ * NEAR <-> yoctoNEAR (24 decimals) and any NEP-141 token's decimals.
  */
 
 export const YOCTO_PER_NEAR = 10n ** 24n;
@@ -61,4 +62,27 @@ export function near(value: bigint | string, maxDecimals = 5): string {
 /** U64 nanosecond string -> Date (millisecond precision). */
 export function nsToDate(ns: string): Date {
   return new Date(Number(BigInt(ns) / 1_000_000n));
+}
+
+const DECIMAL_AMOUNT = /^(\d+)(?:\.(\d+))?$/;
+
+/** Parse a decimal amount ("1.5") into base units with `decimals` (e.g. 6 for USDC). */
+export function parseUnits(amount: string, decimals: number): bigint {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 38) throw new Error(`invalid decimals ${decimals}`);
+  const match = DECIMAL_AMOUNT.exec(amount.trim());
+  if (!match) throw new Error(`invalid amount ${JSON.stringify(amount)} (expected e.g. "1.5")`);
+  const fraction = match[2] ?? '';
+  if (fraction.length > decimals) throw new Error(`invalid amount ${JSON.stringify(amount)}: more than ${decimals} decimals`);
+  return BigInt(match[1] ?? '0') * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, '0') || '0');
+}
+
+/** Format base units with `decimals`, trimming trailing zeros, rounding down to `maxDecimals`. */
+export function formatUnits(value: bigint | string, decimals: number, maxDecimals = decimals): string {
+  const v = toYocto(value);
+  const unit = 10n ** BigInt(decimals);
+  const whole = v / unit;
+  const fraction = (v % unit).toString().padStart(decimals, '0');
+  const shown = fraction.slice(0, maxDecimals).replace(/0+$/, '');
+  if (shown === '' && v % unit !== 0n && whole === 0n) return `<0.${'0'.repeat(Math.max(0, maxDecimals - 1))}1`;
+  return shown ? `${whole}.${shown}` : whole.toString();
 }

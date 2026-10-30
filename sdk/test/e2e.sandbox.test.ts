@@ -5,6 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { defaultCatalog } from '../../demo-api/src/catalog.ts';
 import { createApiServer, type ApiServer } from '../../demo-api/src/server.ts';
 import {
   AllowanceClient,
@@ -16,9 +17,18 @@ import {
   runPaidTask,
   type AllowanceError,
 } from '../src/index.ts';
-import { bootstrapVault, sandboxPrerequisites, startSandboxNode, type DemoVault, type SandboxNode } from '../src/sandbox.ts';
+import {
+  bootstrapToken,
+  bootstrapVault,
+  sandboxPrerequisites,
+  startSandboxNode,
+  tokenPrerequisites,
+  type DemoToken,
+  type DemoVault,
+  type SandboxNode,
+} from '../src/sandbox.ts';
 
-const missing = sandboxPrerequisites();
+const missing = sandboxPrerequisites() ?? tokenPrerequisites();
 if (missing) console.warn(`[e2e] skipping the sandbox end-to-end test: ${missing}`);
 
 describe.skipIf(missing !== null)('end to end on neard-sandbox', () => {
@@ -27,6 +37,7 @@ describe.skipIf(missing !== null)('end to end on neard-sandbox', () => {
   let api: ApiServer;
   let apiUrl: string;
   let agent: AllowanceClient;
+  let token: DemoToken;
 
   beforeAll(async () => {
     node = await startSandboxNode();
@@ -35,9 +46,16 @@ describe.skipIf(missing !== null)('end to end on neard-sandbox', () => {
       policy: ({ payeeId }) => buildPolicy({ perTxCap: '1', budget: { amount: '2', period: '1d' }, allow: [payeeId], approvalThreshold: '0.5' }),
     });
     agent = new AllowanceClient({ vaultId: demo.vaultId, rpcUrl: node.rpcUrl, agentKey: demo.agentSecretKey });
+    token = await bootstrapToken({
+      node,
+      demo,
+      policy: ({ payeeId, tokenId, decimals }) =>
+        buildPolicy({ asset: { ft: tokenId, decimals }, perTxCap: '10', allow: [payeeId], ftStorageDeposit: '0.01' }),
+    });
     api = createApiServer({
       payee: demo.payeeId,
       attacker: demo.attackerId,
+      catalog: defaultCatalog({ ftToken: token.tokenId, ftDecimals: token.decimals }),
       verifier: new ReceiptVerifier({ rpcUrl: node.rpcUrl, trustedCodeHashes: [demo.codeHash] }),
     });
     apiUrl = await api.listen();
@@ -54,9 +72,25 @@ describe.skipIf(missing !== null)('end to end on neard-sandbox', () => {
       { name: 'candles', url: `${apiUrl}/dataset`, check: (d) => (d as { data: { rows: unknown[] } }).data.rows.length === 30 },
       { client: agent, planner: new ScriptedPlanner(), log: (l) => lines.push(l) },
     );
-    expect(res).toMatchObject({ status: 'delivered', passed: true, paidYocto: parseNear('0.02') });
+    expect(res).toMatchObject({ status: 'delivered', passed: true, paidAmount: parseNear('0.02') });
     const receipt = await agent.receipt((res as { receiptId: number }).receiptId);
     expect(receipt).toMatchObject({ kind: 'pay', status: { status: 'paid' }, payee: demo.payeeId, delivered: true, agent: { key: demo.agentPublicKey } });
+  });
+
+  it('a token agent buys a dataset priced in a NEP-141 token: the vault registers the payee and pays with ft_transfer', async () => {
+    const usdAgent = new AllowanceClient({ vaultId: demo.vaultId, rpcUrl: node.rpcUrl, agentKey: token.agentSecretKey });
+    const res = await runPaidTask(
+      { name: 'fx', url: `${apiUrl}/dataset/fx`, check: (d) => (d as { data: { rows: unknown[] } }).data.rows.length === 1440 },
+      { client: usdAgent, planner: new ScriptedPlanner(), log: () => {} },
+    );
+    expect(res).toMatchObject({ status: 'delivered', passed: true, paidAmount: 2_000_000n, asset: { ft: token.tokenId } });
+    const receipt = await usdAgent.receipt((res as { receiptId: number }).receiptId);
+    expect(receipt).toMatchObject({ status: { status: 'paid' }, asset: { ft: token.tokenId }, amount: '2000000', delivered: true });
+    expect(receipt?.storage_deposit).toBe(parseNear('0.01').toString());
+    expect((await usdAgent.token(token.tokenId))?.balance).toBe('98000000');
+    // The NEAR agent cannot spend the tokens: its policy is in NEAR.
+    const sim = await agent.simulate(demo.payeeId, 1n, { asset: { ft: token.tokenId } });
+    expect(sim).toMatchObject({ verdict: 'block', reason: { code: 'asset_not_allowed', allowed: 'near' } });
   });
 
   it('the injected payment is blocked by simulate and rejected on-chain when forced', async () => {
@@ -74,7 +108,9 @@ describe.skipIf(missing !== null)('end to end on neard-sandbox', () => {
   it('kill deletes the key: the next payment is refused by the network', async () => {
     const owner = new OwnerClient({ vaultId: demo.vaultId, ownerId: demo.ownerId, rpcUrl: node.rpcUrl, ownerKey: demo.ownerSecretKey });
     const killed = await owner.kill();
-    expect(killed.value).toEqual([{ key: demo.agentPublicKey }]);
+    expect(killed.value).toHaveLength(2);
+    expect(killed.value).toContainEqual({ key: demo.agentPublicKey });
+    expect(killed.value).toContainEqual({ key: token.agentPublicKey });
     const err = (await agent.pay({ payee: demo.payeeId, amount: parseNear('0.01') }).catch((e: unknown) => e)) as AllowanceError;
     expect(err.code).toBe('access_key_not_found');
   });

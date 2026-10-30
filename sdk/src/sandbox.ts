@@ -13,14 +13,17 @@ import { fileURLToPath } from 'node:url';
 
 import { Account, JsonRpcProvider, KeyPair, actions, baseEncode, nearToYocto, teraToGas, type KeyPairString } from 'near-api-js';
 
+import { setTokenDisplay } from './asset.ts';
 import { OwnerClient } from './owner.ts';
 import type { Policy } from './types.ts';
-import { parseNear } from './units.ts';
+import { parseNear, parseUnits } from './units.ts';
 
 /** Repository root (this file is sdk/src/sandbox.ts). */
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const SANDBOX_NODE_BIN = join(REPO_ROOT, 'target', 'debug', 'examples', 'sandbox_node');
 export const VAULT_WASM = join(REPO_ROOT, 'target', 'near', 'allowance.wasm');
+/** The NEP-141 test token (tests/fixtures/test-token), built by `make build`. */
+export const TOKEN_WASM = join(REPO_ROOT, 'target', 'near', 'test_token', 'test_token.wasm');
 
 export interface SandboxNode {
   rpcUrl: string;
@@ -28,6 +31,11 @@ export interface SandboxNode {
   /** The sandbox's well-known genesis key: only valid on this local chain. */
   rootSecretKey: KeyPairString;
   stop(): Promise<void>;
+}
+
+/** What is missing to run the NEP-141 scenario, or null. */
+export function tokenPrerequisites(): string | null {
+  return existsSync(TOKEN_WASM) ? null : `${TOKEN_WASM} is missing: run \`make build\``;
 }
 
 /** What is missing to run against a sandbox, or null when everything is there. */
@@ -158,4 +166,85 @@ export async function bootstrapVault(options: BootstrapOptions): Promise<DemoVau
     agentPublicKey,
     codeHash,
   };
+}
+
+export interface DemoToken {
+  tokenId: string;
+  symbol: string;
+  decimals: number;
+  /** A second agent key whose policy is in this token. */
+  agentSecretKey: KeyPairString;
+  agentPublicKey: string;
+}
+
+export interface TokenBootstrapOptions {
+  node: Pick<SandboxNode, 'rpcUrl' | 'rootAccountId' | 'rootSecretKey'>;
+  demo: Pick<DemoVault, 'vaultId' | 'ownerId' | 'payeeId'>;
+  policy: (accounts: { payeeId: string; tokenId: string; decimals: number }) => Policy;
+  /** Default "SUSD" (a sandbox-only stand-in for a USD stablecoin), 6 decimals. */
+  symbol?: string;
+  decimals?: number;
+  /** Tokens the owner deposits into the vault with ft_transfer_call (default "100"). */
+  fund?: string;
+  wasmPath?: string;
+  log?: (line: string) => void;
+}
+
+/**
+ * NEP-141 scenario on the sandbox: deploy the test token on `usd.<root>`
+ * with the whole supply minted to the owner, have the owner register it with
+ * the vault (attaching NEAR so the vault registers itself on the token),
+ * fund the vault with `ft_transfer_call`, and register a second agent key
+ * whose policy is in that token. The payee is deliberately NOT registered on
+ * the token: the vault's first payment registers it.
+ */
+export async function bootstrapToken(options: TokenBootstrapOptions): Promise<DemoToken> {
+  const log = options.log ?? (() => {});
+  const { node, demo } = options;
+  const symbol = options.symbol ?? 'SUSD';
+  const decimals = options.decimals ?? 6;
+  const provider = new JsonRpcProvider({ url: node.rpcUrl });
+  const root = new Account(node.rootAccountId, provider, node.rootSecretKey);
+  const rootPk = KeyPair.fromString(node.rootSecretKey).getPublicKey();
+  const tokenId = `usd.${node.rootAccountId}`;
+  const wasm = readFileSync(options.wasmPath ?? TOKEN_WASM);
+  await root.signAndSendTransaction({
+    receiverId: tokenId,
+    actions: [
+      actions.createAccount(),
+      actions.transfer(nearToYocto('5')),
+      actions.addFullAccessKey(rootPk),
+      actions.deployContract(wasm),
+      actions.functionCall(
+        'new',
+        { owner_id: demo.ownerId, total_supply: parseUnits('1000000', decimals).toString(), symbol, decimals },
+        teraToGas('30'),
+        0n,
+      ),
+    ],
+  });
+  setTokenDisplay(tokenId, { symbol, decimals });
+  log(`deployed a NEP-141 test token on ${tokenId} (${symbol}, ${decimals} decimals), supply minted to ${demo.ownerId}`);
+
+  const owner = new OwnerClient({ vaultId: demo.vaultId, ownerId: demo.ownerId, rpcUrl: node.rpcUrl, ownerKey: node.rootSecretKey });
+  await owner.registerToken(tokenId, { attachYocto: parseNear('0.01') });
+  log(`owner registered ${tokenId} with the vault (the vault paid its own storage on the token)`);
+
+  const fund = options.fund ?? '100';
+  const ownerAccount = new Account(demo.ownerId, provider, node.rootSecretKey);
+  await ownerAccount.callFunctionRaw({
+    contractId: tokenId,
+    methodName: 'ft_transfer_call',
+    args: { receiver_id: demo.vaultId, amount: parseUnits(fund, decimals).toString(), msg: 'treasury top-up' },
+    gas: teraToGas('100'),
+    deposit: 1n,
+  });
+  log(`owner deposited ${fund} ${symbol} into the vault with ft_transfer_call`);
+
+  const agentKey = KeyPair.fromRandom('ed25519');
+  const agentPublicKey = agentKey.getPublicKey().toString();
+  const added = await owner.addAgent({ key: agentPublicKey }, 'usd-worker', options.policy({ payeeId: demo.payeeId, tokenId, decimals }));
+  if (added.value !== true) throw new Error('add_agent did not register the token agent');
+  log(`registered a second agent key ${agentPublicKey} with a ${symbol} policy`);
+  return { tokenId, symbol, decimals, agentSecretKey: agentKey.toString() as KeyPairString, agentPublicKey };
 }

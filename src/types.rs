@@ -1,6 +1,6 @@
 //! Storage records and JSON views of the vault.
 
-use near_sdk::json_types::{Base64VecU8, U64};
+use near_sdk::json_types::{Base64VecU8, U64, U128};
 use near_sdk::{AccountId, NearToken, PublicKey, near};
 
 use crate::policy::{Asset, Policy, Rejection, SpendState};
@@ -98,8 +98,28 @@ pub enum ReceiptStatus {
     Denied,
     /// Approval request expired before a human acted.
     Expired,
-    /// Transfer failed (e.g. payee account does not exist); budget released.
-    Failed,
+    /// The payment passed the policy but did not reach the payee; the budget
+    /// reservation (and, for tokens, the vault's token balance) is released.
+    Failed { reason: Failure },
+}
+
+/// Why a payment that passed the policy did not reach the payee.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Failure {
+    /// The NEAR transfer failed (e.g. the payee account does not exist).
+    TransferFailed,
+    /// `ft_transfer` failed on the token contract.
+    FtTransferFailed,
+    /// The payee has no storage on the token and the policy does not let the
+    /// vault register it (`ft_storage_deposit` is not set).
+    PayeeNotRegistered,
+    /// Registering the payee on the token needs more NEAR than the vault has
+    /// above its storage reserve.
+    InsufficientNearForStorage,
+    /// `storage_balance_of` failed or returned something that is not NEP-145.
+    StorageCheckFailed,
 }
 
 /// On-chain proof of a payment, deposit, rejection or withdrawal.
@@ -128,6 +148,10 @@ pub struct Receipt {
     pub pending_id: Option<u64>,
     /// Human who approved the payment, when it needed one.
     pub approved_by: Option<AccountId>,
+    /// NEP-141 payments only: NEAR the vault attached to register the payee on
+    /// the token (`storage_deposit` with `registration_only`; the token
+    /// refunds what it does not use).
+    pub storage_deposit: Option<NearToken>,
 }
 
 /// A payment waiting for human approval. No funds are reserved while pending;
@@ -155,8 +179,8 @@ pub struct Pending {
 pub enum PayOutcome {
     /// Transfer confirmed.
     Paid { receipt_id: u64 },
-    /// Transfer failed; budget released.
-    Failed { receipt_id: u64 },
+    /// The payment did not reach the payee; budget released.
+    Failed { receipt_id: u64, reason: Failure },
     /// Parked in the approval queue.
     NeedsApproval {
         receipt_id: u64,
@@ -214,8 +238,34 @@ pub struct VaultInfo {
     pub pending: u32,
     pub approval_ttl_ns: U64,
     pub key_gas_allowance: NearToken,
+    /// NEP-141 tokens the vault accepts, with the balance it accounts for.
+    pub tokens: Vec<TokenView>,
     pub block_timestamp_ns: U64,
     pub version: String,
+}
+
+/// A NEP-141 token registered by the owner, with the vault's own accounting.
+///
+/// The vault credits tokens that arrive through `ft_transfer_call` (its
+/// `ft_on_transfer`) and debits its payments and withdrawals; tokens sent with
+/// a plain `ft_transfer` are not seen and stay out of the agents' reach until
+/// the owner deposits them properly. The accounted balance can therefore only
+/// be lower than what the token contract reports, never higher.
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenAccount {
+    pub balance: u128,
+    /// Smallest `ft_transfer_call` the vault accepts (anti-dust: every
+    /// deposit writes a receipt the vault pays storage for).
+    pub min_deposit: u128,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+pub struct TokenView {
+    pub token_id: AccountId,
+    pub balance: U128,
+    pub min_deposit: U128,
 }
 
 /// Answer to `ping`: tells an agent who the vault thinks it is.

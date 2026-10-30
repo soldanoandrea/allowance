@@ -2,16 +2,21 @@
  * The HTTP 402 payment flow between an agent and a paid API, settled through
  * an Allowance vault receipt instead of a facilitator. See docs/PAYMENT_FLOW.md.
  *
- *   GET /dataset                                  -> 402 PaymentRequired{payee, amount_yocto, nonce, request_hash_base64}
+ *   GET /dataset                                  -> 402 PaymentRequired{payee, asset, amount, nonce, request_hash_base64}
  *   vault.pay(payee, amount, request_hash)         -> receipt #N (paid)
  *   GET /dataset  X-Allowance-Receipt: vault:N
  *                 X-Allowance-Nonce: <nonce>        -> server: verify_receipt(N, payee, amount, sha256(nonce)) -> 200
  *
- * One counteroffer: `X-Allowance-Offer: <yocto>` (+ `X-Allowance-Offer-Reason`)
+ * Prices are in base units of the quote's `asset`: yoctoNEAR for `"near"`,
+ * the token's smallest unit for `{"ft": "<token>"}` (NEP-141).
+ *
+ * One counteroffer: `X-Allowance-Offer: <base units>` (+ `X-Allowance-Offer-Reason`)
  * on the unpaid request; the server answers with a new 402 quote at the offer
  * (accepted) or at the list price (rejected).
  */
+import { isAsset } from './asset.ts';
 import { isRequestHash, requestHash } from './hash.ts';
+import type { Asset } from './types.ts';
 import { isAccountId } from './validate.ts';
 
 export const PAYMENT_SCHEME = 'allowance-receipt/v1';
@@ -25,8 +30,9 @@ export const HEADERS = {
 
 export interface Counteroffer {
   status: 'accepted' | 'rejected';
-  offered_yocto: string;
-  list_price_yocto: string;
+  /** Base units of the quote's asset. */
+  offered: string;
+  list_price: string;
   reason: string;
 }
 
@@ -36,8 +42,10 @@ export interface PaymentRequired {
   resource: string;
   description: string;
   payee: string;
-  asset: 'near';
-  amount_yocto: string;
+  /** `"near"` or `{"ft": "<token contract>"}`: pay with this asset. */
+  asset: Asset;
+  /** Price in base units of `asset` (yoctoNEAR for NEAR). */
+  amount: string;
   /** Single-use, issued by the server; the agent echoes it back. */
   nonce: string;
   /** `base64(sha256(utf8(nonce)))`: pass it to `pay` as `request_hash`. */
@@ -64,14 +72,14 @@ export function parsePaymentRequired(body: unknown): PaymentRequired {
   if (b['scheme'] !== PAYMENT_SCHEME) throw new Error(`402 body: unsupported scheme ${JSON.stringify(b['scheme'])}`);
   const payee = str('payee');
   if (!isAccountId(payee)) throw new Error(`402 body: payee ${JSON.stringify(payee)} is not an account id`);
-  const amount = str('amount_yocto');
-  if (!/^\d+$/.test(amount) || BigInt(amount) === 0n) throw new Error('402 body: amount_yocto must be a positive integer string');
+  const amount = str('amount');
+  if (!/^\d+$/.test(amount) || BigInt(amount) === 0n) throw new Error('402 body: amount must be a positive integer string (base units)');
   const nonce = str('nonce');
   const hash = str('request_hash_base64');
   if (!isRequestHash(hash)) throw new Error('402 body: request_hash_base64 is not 32 bytes of base64');
   // Do not trust the server's arithmetic: the hash must be sha256(nonce).
   if (requestHash(nonce) !== hash) throw new Error('402 body: request_hash_base64 != sha256(nonce)');
-  if (b['asset'] !== 'near') throw new Error('402 body: only asset "near" is supported');
+  if (!isAsset(b['asset'])) throw new Error('402 body: asset must be "near" or {"ft": "<token account>"}');
   return body as PaymentRequired;
 }
 

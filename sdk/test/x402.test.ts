@@ -11,7 +11,7 @@ function quote(overrides: Record<string, unknown> = {}) {
     description: 'candles',
     payee: 'api.test',
     asset: 'near',
-    amount_yocto: '20000000000000000000000',
+    amount: '20000000000000000000000',
     nonce,
     request_hash_base64: requestHash(nonce),
     expires_at: '2026-10-31T00:00:00.000Z',
@@ -26,6 +26,10 @@ describe('402 quotes', () => {
     expect(parsePaymentRequired(quote()).payee).toBe('api.test');
   });
 
+  it('accepts quotes priced in a NEP-141 token', () => {
+    expect(parsePaymentRequired(quote({ asset: { ft: 'usdc.test' }, amount: '2000000' })).asset).toEqual({ ft: 'usdc.test' });
+  });
+
   it('refuses a quote whose request hash is not sha256(nonce)', () => {
     expect(() => parsePaymentRequired(quote({ request_hash_base64: requestHash('other') }))).toThrow(/sha256\(nonce\)/);
   });
@@ -34,9 +38,11 @@ describe('402 quotes', () => {
     expect(() => parsePaymentRequired(null)).toThrow();
     expect(() => parsePaymentRequired(quote({ scheme: 'x402' }))).toThrow(/scheme/);
     expect(() => parsePaymentRequired(quote({ payee: 'Not An Account' }))).toThrow(/payee/);
-    expect(() => parsePaymentRequired(quote({ amount_yocto: '0' }))).toThrow(/amount/);
-    expect(() => parsePaymentRequired(quote({ amount_yocto: '1.5' }))).toThrow(/amount/);
-    expect(() => parsePaymentRequired(quote({ asset: { ft: 'usdc.test' } }))).toThrow(/asset/);
+    expect(() => parsePaymentRequired(quote({ amount: '0' }))).toThrow(/amount/);
+    expect(() => parsePaymentRequired(quote({ amount: '1.5' }))).toThrow(/amount/);
+    expect(() => parsePaymentRequired(quote({ asset: 'eth' }))).toThrow(/asset/);
+    expect(() => parsePaymentRequired(quote({ asset: { ft: 'Not An Account' } }))).toThrow(/asset/);
+    expect(() => parsePaymentRequired(quote({ asset: { ft: 'usdc.test', extra: 1 } }))).toThrow(/asset/);
   });
 });
 

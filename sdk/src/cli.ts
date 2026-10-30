@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 import { guardedPay, logPayResult, logSimulation } from './agent/guarded-pay.ts';
+import { formatAmount, isNear, parseAsset, parseAssetAmount, tokenDisplay, tokenOf } from './asset.ts';
 import { AllowanceClient } from './client.ts';
 import { describeAgent, describePolicy, describeRejection, describeStatus, iso } from './describe.ts';
 import { AllowanceError } from './errors.ts';
@@ -17,8 +18,8 @@ import { table } from './format.ts';
 import { requestHash } from './hash.ts';
 import { AGENT_KEY_ENV, OWNER_KEY_ENV, loadKey } from './keys.ts';
 import { OwnerClient } from './owner.ts';
-import type { AgentId, Receipt } from './types.ts';
-import { near, parseAmount } from './units.ts';
+import type { AgentId, Asset, Receipt } from './types.ts';
+import { near } from './units.ts';
 
 export interface CliIo {
   out: (line: string) => void;
@@ -32,8 +33,8 @@ export const EXIT = { ok: 0, error: 1, needsApproval: 2, refused: 3 } as const;
 const USAGE = `allowance <command> [options]
 
 Agent (signs with the function-call key: --key-file <path> or $${AGENT_KEY_ENV})
-  simulate --payee <account> --amount <NEAR>     free dry-run: allow | needs_approval | block
-  pay      --payee <account> --amount <NEAR> [--memo <text>] [--nonce <n> | --request-hash <b64>]
+  simulate --payee <account> --amount <amount>   free dry-run: allow | needs_approval | block
+  pay      --payee <account> --amount <amount> [--memo <text>] [--nonce <n> | --request-hash <b64>]
            [--force]                             simulate first and refuse on block (--force: sign anyway)
   confirm  --receipt <id> --passed <true|false>  record whether the purchase was delivered
   ping                                           how the vault identifies this key
@@ -41,7 +42,7 @@ Agent (signs with the function-call key: --key-file <path> or $${AGENT_KEY_ENV})
 Read-only (no key needed)
   receipts [--from <id>] [--limit <n>]           receipts table
   ledger                                         vault, agents and policies, approvals, recent receipts
-  verify   --receipt <id> --payee <account> --amount <NEAR> [--nonce <n>]
+  verify   --receipt <id> --payee <account> --amount <amount> [--nonce <n>]
 
 Owner / approver (--owner <account>, key: --owner-key-file <path> or $${OWNER_KEY_ENV})
   approve <pending id>    deny <pending id>    kill
@@ -50,8 +51,10 @@ Common options
   --vault <account>   vault contract account   ($ALLOWANCE_VAULT)
   --rpc <url>         NEAR JSON-RPC endpoint    ($ALLOWANCE_RPC_URL)
   --agent <ed25519:pk> simulate for this agent key without holding it
+  --asset near|ft:<token>  asset of simulate / pay / verify (default near; NEP-141 token by contract)
   --json              machine-readable output
-Amounts are NEAR ("0.02") unless suffixed with "yocto".`;
+Amounts are NEAR ("0.02", or "...yocto"), or for --asset ft:<token> a decimal in the
+token's units ("1.5", decimals read from its ft_metadata) or base units ("1500000units").`;
 
 const OPTIONS = {
   vault: { type: 'string' },
@@ -62,6 +65,7 @@ const OPTIONS = {
   agent: { type: 'string' },
   payee: { type: 'string' },
   amount: { type: 'string' },
+  asset: { type: 'string' },
   memo: { type: 'string' },
   nonce: { type: 'string' },
   'request-hash': { type: 'string' },
@@ -159,8 +163,23 @@ function ownerClient(values: Values, io: CliIo): OwnerClient {
   return new OwnerClient({ ...target(values, io), ownerId, ownerKey: key.secretKey });
 }
 
-function amountOf(values: Values): bigint {
-  return parseAmount(required(values.amount, '--amount'));
+function assetOf(values: Values): Asset {
+  return parseAsset(values.asset ?? 'near');
+}
+
+/** Read symbol and decimals of the tokens in `assets` once (for parsing and display). */
+async function learnTokens(client: AllowanceClient, assets: Array<Asset | null | undefined>): Promise<void> {
+  const tokens = new Set(assets.map(tokenOf).filter((t): t is string => t !== null && !tokenDisplay(t)));
+  await Promise.all([...tokens].map((t) => client.ftMetadata(t).catch(() => undefined)));
+}
+
+async function amountOf(values: Values, client: AllowanceClient, asset: Asset): Promise<bigint> {
+  await learnTokens(client, [asset]);
+  return parseAssetAmount(required(values.amount, '--amount'), asset);
+}
+
+function assetOpt(asset: Asset): { asset?: Asset } {
+  return isNear(asset) ? {} : { asset };
 }
 
 function intOf(value: string | undefined, what: string): number {
@@ -179,7 +198,7 @@ function print(io: CliIo, values: Values, json: unknown, text: () => string): vo
 
 async function simulate(values: Values, io: CliIo): Promise<number> {
   const payee = required(values.payee, '--payee');
-  const amount = amountOf(values);
+  const asset = assetOf(values);
   let client: AllowanceClient;
   let agentId: AgentId | undefined;
   if (values.agent) {
@@ -188,10 +207,11 @@ async function simulate(values: Values, io: CliIo): Promise<number> {
   } else {
     client = agentClient(values, io);
   }
-  const sim = await client.simulate(payee, amount, agentId ? { agentId } : {});
+  const amount = await amountOf(values, client, asset);
+  const sim = await client.simulate(payee, amount, { ...(agentId ? { agentId } : {}), ...assetOpt(asset) });
   print(io, values, sim, () => {
     const lines: string[] = [];
-    logSimulation((l) => lines.push(l), payee, amount, sim);
+    logSimulation((l) => lines.push(l), payee, amount, sim, asset);
     return lines.join('\n');
   });
   return sim.verdict === 'block' ? EXIT.refused : sim.verdict === 'needs_approval' ? EXIT.needsApproval : EXIT.ok;
@@ -200,11 +220,13 @@ async function simulate(values: Values, io: CliIo): Promise<number> {
 async function pay(values: Values, io: CliIo): Promise<number> {
   const client = agentClient(values, io);
   const payee = required(values.payee, '--payee');
-  const amount = amountOf(values);
+  const asset = assetOf(values);
+  const amount = await amountOf(values, client, asset);
   const hash = values['request-hash'] ?? (values.nonce ? requestHash(values.nonce) : undefined);
   const request = {
     payee,
     amount,
+    ...assetOpt(asset),
     ...(values.memo !== undefined ? { memo: values.memo } : {}),
     ...(hash !== undefined ? { requestHash: hash } : {}),
   };
@@ -218,7 +240,7 @@ async function pay(values: Values, io: CliIo): Promise<number> {
   if (values.force) {
     log('--force: skipping the simulate guard, the contract decides on-chain');
     const result = await client.pay(request);
-    logPayResult(log, result);
+    logPayResult(log, result, asset);
     outcomeJson = result;
     code = exitFor(result.outcome.outcome);
   } else {
@@ -269,7 +291,7 @@ function receiptRows(list: Receipt[]): string[][] {
     describeStatus(r.status),
     describeAgent(r.agent),
     r.payee,
-    near(r.amount),
+    formatAmount(r.amount, r.asset),
     r.delivered === null ? '' : r.delivered ? 'pass' : 'FAIL',
     r.memo.length > 40 ? `${r.memo.slice(0, 39)}~` : r.memo,
   ]);
@@ -283,6 +305,7 @@ async function receipts(values: Values, io: CliIo): Promise<number> {
     ...(values.from !== undefined ? { fromId: intOf(values.from, '--from') } : {}),
     ...(values.limit !== undefined ? { limit: intOf(values.limit, '--limit') } : {}),
   });
+  await learnTokens(client, list.map((r) => r.asset));
   print(io, values, list, () => (list.length ? table(RECEIPT_HEADERS, receiptRows(list)) : 'no receipts'));
   return EXIT.ok;
 }
@@ -301,21 +324,27 @@ async function ledger(values: Values, io: CliIo): Promise<number> {
   const client = readClient(values, io);
   const [info, agents, pending] = await Promise.all([client.vault(), client.agents(), client.pending()]);
   const recent = await client.receipts({ fromId: Math.max(info.first_receipt_id, info.next_receipt_id - 10), limit: 10 });
+  await learnTokens(client, [
+    ...info.tokens.map((t): Asset => ({ ft: t.token_id })),
+    ...agents.map((a) => a.policy.asset),
+    ...recent.map((r) => r.asset),
+  ]);
   print(io, values, { vault: info, agents, pending, receipts: recent, ledger_url: ledgerUrl(rpcUrl, vaultId) }, () => {
     const out = [
       `vault ${vaultId}  owner ${info.owner_id}${info.approver_id ? `  approver ${info.approver_id}` : ''}  ${info.paused ? 'PAUSED' : 'running'}`,
       `balance ${near(info.balance)}  available ${near(info.available)}  receipts ${info.next_receipt_id}  pending ${info.pending}`,
+      ...info.tokens.map((t) => `token ${t.token_id}: ${formatAmount(t.balance, { ft: t.token_id })} accounted by the vault`),
       '',
       `agents (${agents.length})`,
     ];
     for (const a of agents) {
-      const remaining = a.remaining_budget === null ? '' : `, ${near(a.remaining_budget)} left in window`;
+      const remaining = a.remaining_budget === null ? '' : `, ${formatAmount(a.remaining_budget, a.policy.asset)} left in window`;
       out.push(`  ${describeAgent(a.id)} "${a.label}" ${a.active ? 'active' : 'DISABLED'}, policy v${a.policy_version}, ${a.state.payments} payments${remaining}`);
       for (const line of describePolicy(a.policy)) out.push(`    - ${line}`);
     }
     out.push('', `pending approvals (${pending.length})`);
     for (const p of pending) {
-      out.push(`  #${p.id} receipt #${p.receipt_id}: ${near(p.amount)} -> ${p.payee} "${p.memo}" (expires ${iso(p.expires_at_ns)})`);
+      out.push(`  #${p.id} receipt #${p.receipt_id}: ${formatAmount(p.amount, p.asset)} -> ${p.payee} "${p.memo}" (expires ${iso(p.expires_at_ns)})`);
     }
     out.push('', 'recent receipts', recent.length ? table(RECEIPT_HEADERS, receiptRows(recent)) : 'no receipts');
     out.push('', `ledger page: ${ledgerUrl(rpcUrl, vaultId)}`);
@@ -327,11 +356,13 @@ async function ledger(values: Values, io: CliIo): Promise<number> {
 async function verify(values: Values, io: CliIo): Promise<number> {
   const client = readClient(values, io);
   const receiptId = intOf(values.receipt, '--receipt');
+  const asset = assetOf(values);
   const ok = await client.verifyReceipt({
     receiptId,
     payee: required(values.payee, '--payee'),
-    minAmount: amountOf(values),
+    minAmount: await amountOf(values, client, asset),
     ...(values.nonce ? { requestHash: requestHash(values.nonce) } : {}),
+    ...assetOpt(asset),
   });
   print(io, values, { receipt_id: receiptId, verified: ok }, () => `receipt #${receiptId}: ${ok ? 'VERIFIED' : 'not valid for this payee/amount/request'}`);
   return ok ? EXIT.ok : EXIT.refused;
