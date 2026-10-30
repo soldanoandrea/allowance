@@ -41,6 +41,21 @@ describe('ReceiptVerifier (payee side)', () => {
     expect(await bad.verify(claim)).toMatchObject({ ok: false, reason: 'untrusted_code' });
   });
 
+  it('accepts a factory vault that uses the trusted code as a global contract by hash, never one by account id', async () => {
+    rpc.view('verify_receipt', () => true);
+    const v = new ReceiptVerifier({ rpcUrl: rpc.url, trustedCodeHashes: ['GoodHash111111111111111111111111'] });
+    rpc.extra['query'] = (params) => {
+      if (params['request_type'] === 'call_function') {
+        return { block_hash: rpc.blockHash, block_height: 1, logs: [], result: [...Buffer.from('true')] };
+      }
+      return { block_hash: rpc.blockHash, block_height: 1, amount: '1', locked: '0', storage_usage: 300, code_hash: '11111111111111111111111111111111', ...globalRef };
+    };
+    let globalRef: Record<string, string> = { global_contract_hash: 'GoodHash111111111111111111111111' };
+    expect((await v.verify(claim)).ok).toBe(true);
+    globalRef = { global_contract_account_id: 'publisher.test' };
+    expect(await v.verify(claim)).toMatchObject({ ok: false, reason: 'untrusted_code' });
+  });
+
   it('explains a refusal (wrong payee, amount, request hash)', async () => {
     rpc.view('verify_receipt', () => false);
     const v = new ReceiptVerifier({ rpcUrl: rpc.url, trustedVaults: ['vault.test'] });

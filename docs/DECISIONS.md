@@ -282,3 +282,39 @@ design says.
     sandbox account is minutes old, so the API payments carry
     `risk=warn[new_account]`, and the attacker, passed as the shared
     deny-list, is blocked before `simulate` (a tenth check).
+
+### Vault factory on a global contract (`factory/`)
+
+59. **Global contract by code hash, verified on the sandbox.** neard-sandbox
+    2.14 runs NEP-591 global contracts, so no embedded-wasm fallback was
+    needed. The vault wasm is published once with `DeployGlobalContract`
+    (hash mode: immutable); `create_vault` creates `<name>.<factory>` with
+    one batch `CreateAccount + Transfer + UseGlobalContract(hash) +
+    FunctionCall(new)`, then a callback records it or refunds the caller (a
+    failed batch is rolled back as a whole, and its deposit returns to the
+    factory, not to the caller, hence the explicit refund). Measured on the
+    sandbox: publishing the 364,576-byte vault burned 36.47 NEAR (10x the
+    storage rate); each vault then stores ~312 bytes (about 0.003 NEAR of
+    storage stake, versus ~3.6 NEAR for its own copy of the code).
+    DESIGN's "<0.001 NEAR to spin up" is therefore 0.003 NEAR of stake plus
+    the deposit the owner chooses (default minimum 0.1 NEAR).
+60. **Hash mode, not account-id mode**: a vault created by the factory can
+    never have its code changed under it, by the factory owner or anyone;
+    `set_vault_code_hash` only affects vaults created afterwards. The
+    account-id mode (upgradable by the publisher) would let one key change
+    every vault's rules.
+61. **Factory vaults have no access key** (lock mode by construction):
+    they are managed by `owner_id` through the owner methods, and agent keys
+    are added by the vault itself, as before.
+62. **`view_account` of a global-contract user reports `code_hash` as all
+    ones** and the hash in `global_contract_hash` (or
+    `global_contract_account_id` in account mode). The SDK's
+    `ReceiptVerifier` (payee trust by code hash) and the risk check use
+    `global_contract_hash` when present and never trust account-mode code,
+    which can change; the risk check flags it as `mutable_code`.
+63. The factory is a second crate in the cargo workspace (vault, factory,
+    test token); `cargo test` runs the vault's unit and sandbox tests plus
+    the factory sandbox test (`tests/factory.rs`), `cargo test --workspace`
+    (what `make test` and CI run) adds the factory's unit tests. No
+    TypeScript client for the factory yet: the testnet scripts deploy a
+    vault directly.

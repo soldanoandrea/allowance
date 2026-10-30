@@ -5,35 +5,38 @@
 # Contract (Rust)
 # ----------------------------------------------------------------------
 
-# Compile the contract to target/near/allowance.wasm (no Docker needed), and
-# the NEP-141 test token used by the tests and the demo to
-# target/near/test_token/test_token.wasm.
+# Compile the contract to target/near/allowance.wasm (no Docker needed), the
+# vault factory to target/near/allowance_factory/, and the NEP-141 test token
+# used by the tests and the demo to target/near/test_token/.
 build:
 	cargo near build non-reproducible-wasm
+	cargo near build non-reproducible-wasm --manifest-path factory/Cargo.toml
 	cargo near build non-reproducible-wasm --no-abi --manifest-path tests/fixtures/test-token/Cargo.toml
 
 # Everything Rust: unit tests of the policy core and contract, then sandbox
 # tests (they compile the wasm themselves and download neard-sandbox on
 # first run).
 test:
-	cargo test
+	cargo test --workspace
 
-# Fast feedback: pure policy evaluation + contract logic with a mocked VM.
+# Fast feedback: pure policy evaluation + contract logic with a mocked VM
+# (vault and factory).
 test-unit:
-	cargo test --lib
+	cargo test --lib --workspace
 
-# Integration tests against a local NEAR sandbox node.
+# Integration tests against a local NEAR sandbox node (vault, then the
+# factory on a global contract).
 test-sandbox:
-	cargo test --test sandbox -- --nocapture
+	cargo test --test sandbox --test factory -- --nocapture
 
 fmt:
 	cargo fmt --all
 
 clippy:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 size: build
-	@ls -l target/near/allowance.wasm | awk '{printf "allowance.wasm: %d bytes (%.1f KB)\n", $$5, $$5/1024}'
+	@ls -l target/near/allowance.wasm target/near/allowance_factory/allowance_factory.wasm | awk '{printf "%s: %d bytes (%.1f KB)\n", $$9, $$5, $$5/1024}'
 
 clean:
 	cargo clean

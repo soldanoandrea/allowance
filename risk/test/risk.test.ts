@@ -91,6 +91,17 @@ describe('counterparty risk: contract code', () => {
     expect(r.account.codeChangedAtHeight).toBe(99_993);
   });
 
+  it('global contracts: by hash is a normal contract, by publisher account is mutable code (warn)', async () => {
+    chain.accounts.set('vault1.factory.test', { createdAt: 10, global: { hash: 'VaultHash' } });
+    chain.accounts.set('mut.test', { createdAt: 10, global: { account: 'publisher.test' } });
+    const byHash = await risk().assess('vault1.factory.test');
+    expect(byHash.verdict).toBe('allow');
+    expect(byHash.account).toMatchObject({ hasCode: true, codeHash: 'global:VaultHash' });
+    const byAccount = await risk().assess('mut.test');
+    expect(byAccount.verdict).toBe('warn');
+    expect(codes(byAccount)).toContain('mutable_code');
+  });
+
   it('a contract whose code is old is only an info signal', async () => {
     const r = await risk().assess('dapp.test');
     expect(r.verdict).toBe('allow');

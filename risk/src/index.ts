@@ -22,7 +22,7 @@
  */
 import { AllowanceClient, formatAmount, isAccountId, sameAsset, type Asset, type PaymentRequired, type Receipt } from '@allowance/sdk';
 
-import { NO_CODE, Rpc, RpcError, type BlockHeader } from './rpc.ts';
+import { NO_CODE, Rpc, RpcError, type AccountView, type BlockHeader } from './rpc.ts';
 
 export { NO_CODE, Rpc, RpcError, type AccountView, type BlockHeader, type BlockRef, type RpcErrorKind } from './rpc.ts';
 
@@ -37,6 +37,7 @@ export type SignalCode =
   | 'account_age'
   | 'age_unknown'
   | 'contract_account'
+  | 'mutable_code'
   | 'code_changed'
   | 'code_history_unknown'
   | 'first_payment'
@@ -61,6 +62,11 @@ export interface AccountFacts {
   ageDays: number | null;
   ageSource: 'fastnear' | 'archival_rpc' | 'none';
   hasCode: boolean;
+  /**
+   * The code it runs: its own code hash, `global:<hash>` for a global
+   * contract used by hash, `global-account:<publisher>` for one used by
+   * account id (mutable).
+   */
   codeHash: string | null;
   /** Height from which the current code is in place, when it changed inside the window. */
   codeChangedAtHeight: number | null;
@@ -204,11 +210,18 @@ export class CounterpartyRisk {
           return;
         }
         account.exists = true;
-        account.codeHash = now.code_hash;
-        account.hasCode = now.code_hash !== NO_CODE;
+        account.codeHash = codeIdentity(now);
+        account.hasCode = account.codeHash !== NO_CODE;
         await this.#age(payee, head, account, accountSignals);
         if (account.hasCode) {
-          accountSignals.push({ code: 'contract_account', level: 'info', detail: `${payee} runs a contract (code hash ${now.code_hash})` });
+          accountSignals.push({ code: 'contract_account', level: 'info', detail: `${payee} runs a contract (${describeCode(account.codeHash)})` });
+          if (now.global_contract_account_id) {
+            accountSignals.push({
+              code: 'mutable_code',
+              level: 'warn',
+              detail: `${payee} runs the global contract published by ${now.global_contract_account_id}, which its publisher can change at any time`,
+            });
+          }
           await this.#codeHistory(payee, head, account, accountSignals);
         }
       });
@@ -403,7 +416,8 @@ export class CounterpartyRisk {
     const codeAt = async (h: number): Promise<{ code: string | 'unavailable'; height: number }> => {
       for (let x = h; x <= Math.min(head.height, h + SKIPPED_HEIGHT_PROBES); x++) {
         try {
-          return { code: (await this.#archival.account(payee, { block_id: x }))?.code_hash ?? NO_CODE, height: x };
+          const view = await this.#archival.account(payee, { block_id: x });
+          return { code: view ? codeIdentity(view) : NO_CODE, height: x };
         } catch (err) {
           if (err instanceof RpcError && err.kind === 'unknown_block') continue;
           if (err instanceof RpcError && err.kind === 'unavailable_block') return { code: 'unavailable', height: x };
@@ -465,6 +479,19 @@ export class CounterpartyRisk {
     }
     return history;
   }
+}
+
+/** One string per code an account can run (own code, global by hash, global by publisher). */
+function codeIdentity(view: AccountView): string {
+  if (view.global_contract_hash) return `global:${view.global_contract_hash}`;
+  if (view.global_contract_account_id) return `global-account:${view.global_contract_account_id}`;
+  return view.code_hash;
+}
+
+function describeCode(code: string | null): string {
+  if (code?.startsWith('global:')) return `global contract ${code.slice(7)}`;
+  if (code?.startsWith('global-account:')) return `global contract of ${code.slice(15)}`;
+  return `code hash ${code}`;
 }
 
 function describeAge(ms: number, atLeast: boolean): string {

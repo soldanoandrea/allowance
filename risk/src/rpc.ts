@@ -18,7 +18,12 @@ export class RpcError extends Error {
 
 export interface AccountView {
   amount: string;
+  /** All ones when the account has no own code (including global-contract users). */
   code_hash: string;
+  /** Set when the account uses a global contract by hash (immutable). */
+  global_contract_hash?: string | null;
+  /** Set when the account uses a global contract by publisher account (mutable). */
+  global_contract_account_id?: string | null;
   storage_usage: number;
   block_height: number;
   block_hash: string;

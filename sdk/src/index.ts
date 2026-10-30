@@ -34,7 +34,7 @@ export {
   type PaymentRequired,
   type Counteroffer,
 } from './x402.ts';
-export { ReceiptVerifier, type VerifierOptions, type ReceiptClaim, type VerifyResult } from './verifier.ts';
+export { ReceiptVerifier, effectiveCodeHash, type VerifierOptions, type ReceiptClaim, type VerifyResult } from './verifier.ts';
 export { ScriptedPlanner, enforceGuardrails, type Planner, type Plan, type PlanInput } from './agent/planner.ts';
 export { LlmPlanner, parsePlan, NEAR_AI_DEFAULT_BASE_URL, NEAR_AI_DEFAULT_MODEL, type LlmPlannerOptions } from './agent/llm-planner.ts';
 export { guardedPay, logSimulation, logPayResult, type Log, type GuardedPayResult } from './agent/guarded-pay.ts';

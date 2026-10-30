@@ -10,6 +10,8 @@ export interface MockAccount {
   createdAt: number;
   /** [height, code hash] in increasing height order; empty = no contract. */
   code?: Array<[number, string]>;
+  /** Uses a global contract (by hash, or by publisher account). */
+  global?: { hash?: string; account?: string };
 }
 
 export class MockChain {
@@ -78,7 +80,8 @@ export class MockChain {
           const a = this.accounts.get(String(params['account_id']));
           if (!a || a.createdAt > h) throw new Error('UNKNOWN_ACCOUNT');
           const code = (a.code ?? []).filter(([at]) => at <= h).at(-1)?.[1] ?? '11111111111111111111111111111111';
-          return { ...meta, amount: '1', locked: '0', code_hash: code, storage_usage: 100, storage_paid_at: 0 };
+          const global = a.global?.hash ? { global_contract_hash: a.global.hash } : a.global?.account ? { global_contract_account_id: a.global.account } : {};
+          return { ...meta, amount: '1', locked: '0', code_hash: code, storage_usage: 100, storage_paid_at: 0, ...global };
         }
         if (type === 'call_function') {
           const name = String(params['method_name']);

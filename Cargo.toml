@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # The vault is the root package; the other members are a vault factory and a
 # NEP-141 test token used only by the tests and the local demo.
 [workspace]
-members = ["tests/fixtures/test-token"]
+members = ["factory", "tests/fixtures/test-token"]
 
 # Reproducible-build descriptor (NEP-330). Not used by the hackathon build path
 # (`cargo near build non-reproducible-wasm`), kept so `cargo near build` can

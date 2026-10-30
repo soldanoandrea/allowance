@@ -10,8 +10,12 @@ export interface VerifierOptions {
   /** Vault accounts whose receipts are accepted as they are. */
   trustedVaults?: string[];
   /**
-   * Contract code hashes (base58, as in `view_account.code_hash`): any vault
-   * running exactly this code is accepted. Checked at the same block as the
+   * Contract code hashes (base58 sha256 of the wasm): any vault running
+   * exactly this code is accepted, deployed as its own copy
+   * (`view_account.code_hash`) or as a global contract by hash
+   * (`global_contract_hash`, e.g. a vault created by the factory). Vaults
+   * that use a global contract by account id are not accepted this way:
+   * that code can be changed by its publisher. Checked at the same block as the
    * `verify_receipt` call, so a vault cannot swap its code in between.
    */
   trustedCodeHashes?: string[];
@@ -47,6 +51,19 @@ export type VerifyResult =
  * the server accepts a vault either by name (`trustedVaults`) or because it
  * runs audited Allowance code (`trustedCodeHashes`).
  */
+const NO_CODE = '11111111111111111111111111111111';
+
+/**
+ * The code an account runs, as an immutable hash: its own code, or the
+ * global contract it uses by hash; null for a global contract used by
+ * account id (mutable) or no contract.
+ */
+export function effectiveCodeHash(account: { code_hash: string; global_contract_hash?: string | null; global_contract_account_id?: string | null }): string | null {
+  if (account.global_contract_hash) return account.global_contract_hash;
+  if (account.global_contract_account_id) return null;
+  return account.code_hash && account.code_hash !== NO_CODE ? account.code_hash : null;
+}
+
 export class ReceiptVerifier {
   readonly provider: JsonRpcProvider;
   readonly #trustedVaults: Set<string>;
@@ -105,8 +122,9 @@ export class ReceiptVerifier {
     });
     if (!byName) {
       const account = await this.provider.viewAccount({ accountId: claim.vaultId, blockQuery: { blockId: raw.block_hash } });
-      if (!this.#trustedCodeHashes.has(account.code_hash)) {
-        return { ok: false, reason: 'untrusted_code', detail: `vault ${claim.vaultId} runs code ${account.code_hash}, not a trusted Allowance build` };
+      const code = effectiveCodeHash(account);
+      if (code === null || !this.#trustedCodeHashes.has(code)) {
+        return { ok: false, reason: 'untrusted_code', detail: `vault ${claim.vaultId} runs code ${code ?? 'that can change (global contract by account id)'}, not a trusted Allowance build` };
       }
     }
     const verified = JSON.parse(Buffer.from(raw.result).toString('utf8')) === true;
