@@ -23,6 +23,8 @@ export interface PolicySpec {
   budget?: { amount: string; period: string };
   /** Allowlisted payees; omit for "any" (the vault denylist still applies). */
   allow?: string[];
+  /** Allowlisted Allowance vaults, paid through their `deposit` (their revenue split applies). */
+  allowVaults?: string[];
   /** Above this amount (NEAR) a human approves. Must be below perTxCap. */
   approvalThreshold?: string;
   /** Minimum time between payments ("10s"). */
@@ -40,7 +42,15 @@ export function buildPolicy(spec: PolicySpec): Policy {
   const policy: Policy = {
     asset: spec.asset ? { ft: spec.asset.ft } : 'near',
     per_tx_cap: units(spec.perTxCap),
-    allow: spec.allow ? { list: spec.allow.map((account_id) => ({ account_id })) } : 'any',
+    allow:
+      spec.allow || spec.allowVaults
+        ? {
+            list: [
+              ...(spec.allow ?? []).map((account_id) => ({ account_id })),
+              ...(spec.allowVaults ?? []).map((account_id) => ({ account_id, methods: ['deposit'] })),
+            ],
+          }
+        : 'any',
     cooldown_ns: spec.cooldown ? parseDuration(spec.cooldown) : '0',
   };
   if (spec.budget) {

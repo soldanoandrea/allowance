@@ -99,7 +99,8 @@
         stat('Agents', String(v.agents), 'key gas allowance ' + L.formatNear(v.key_gas_allowance)),
         stat('Receipts', String(v.next_receipt_id), v.first_receipt_id ? 'oldest kept #' + v.first_receipt_id : 'none pruned'),
         stat('Pending approvals', String(v.pending), 'expire after ' + L.duration(v.approval_ttl_ns)),
-      ])),
+      ], v.split ? [stat('Revenue split', v.split.beneficiaries.map(function (b) { return b.bps / 100 + '%'; }).join(' + '),
+        v.split.beneficiaries.map(function (b) { return b.account_id; }).join(', '))] : [])),
     ]);
   }
 
@@ -153,7 +154,10 @@
       return h('tr', null, [
         td('#' + r.id), td(L.isoFromNs(r.ts_ns).slice(5)), td(r.kind), status,
         td(h('span', { class: 'mono', title: r.agent.key || r.agent.account || '', text: L.describeAgent(r.agent) })),
-        td(r.payee), td(L.formatAmount(r.amount, r.asset), 'num'), td(delivered), td(r.memo, 'wrap'),
+        td(r.payee), td(L.formatAmount(r.amount, r.asset), 'num'), td(delivered),
+        td((r.memo || '') + ((r.split || []).length ? (r.memo ? ' | ' : '') + 'split: ' + r.split.map(function (p) {
+          return p.account_id + ' ' + L.formatAmount(p.amount, r.asset) + ' (' + p.status + ')';
+        }).join(', ') : ''), 'wrap'),
       ]);
     });
     return section('Receipts (newest first)', [table(['Id', 'Time (UTC)', 'Kind', 'Status', 'Agent', 'Payee', 'Amount', 'Delivered', 'Memo'], rows, [6])]);

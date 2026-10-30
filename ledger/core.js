@@ -296,6 +296,8 @@
       case 'approval_requested': return 'request #' + d.pending_id + ': ' + amt() + ' -> ' + d.payee;
       case 'ft_payee_registration': return '#' + d.receipt_id + ' registers ' + d.payee + ' on ' + d.token_id + ' (up to ' + formatNear(d.attached) + ')';
       case 'token_registered': return d.token_id;
+      case 'split_settled': return '#' + d.receipt_id + ' share ' + amt() + ' -> ' + d.beneficiary + (d.paid ? '' : ' FAILED (kept)');
+      case 'split_set': return d.split ? d.split.beneficiaries.map(function (b) { return b.account_id + ' ' + b.bps / 100 + '%'; }).join(', ') : 'removed';
       case 'approval_granted':
       case 'approval_denied': return 'request #' + d.pending_id + ' by ' + d.approver;
       case 'delivery_confirmed': return '#' + d.receipt_id + ' ' + (d.passed ? 'pass' : 'FAIL');

@@ -113,6 +113,22 @@ describe('descriptions', () => {
     expect(formatUnits(1n, 6)).toBe('0.000001');
   });
 
+  it('allowlists other vaults as deposit payees and describes income splits', () => {
+    const policy = buildPolicy({ perTxCap: '1', allow: ['api.test'], allowVaults: ['shop.test'] });
+    expect(policy.allow).toEqual({ list: [{ account_id: 'api.test' }, { account_id: 'shop.test', methods: ['deposit'] }] });
+    expect(describePolicy(policy)[1]).toBe('payees: api.test, shop.test (vault, via deposit)');
+    const income = {
+      id: 4, kind: 'income' as const, status: { status: 'paid' as const }, agent: { account: 'vault.test' }, payee: 'shop.test',
+      amount: parseNear('1').toString(), asset: 'near' as const, memo: '', request_hash: null, ts_ns: '0', policy_version: 0,
+      delivered: null, pending_id: null, approved_by: null, storage_deposit: null,
+      split: [
+        { account_id: 'carol.test', bps: 1000, amount: parseNear('0.1').toString(), status: 'paid' as const },
+        { account_id: 'dave.test', bps: 500, amount: parseNear('0.05').toString(), status: 'failed' as const },
+      ],
+    };
+    expect(describeReceipt(income)).toBe('#4 income 1 NEAR -> shop.test [paid]; split: carol.test 0.1 NEAR (paid), dave.test 0.05 NEAR (failed)');
+  });
+
   it('formats durations, keys and receipts', () => {
     expect(duration('90061000000000')).toBe('1d1h1m1s');
     expect(duration('0')).toBe('0s');
@@ -122,6 +138,7 @@ describe('descriptions', () => {
         id: 3, kind: 'pay', status: { status: 'paid' }, agent: { key: 'ed25519:x' }, payee: 'api.test', amount: '800000000000000000000000',
         asset: 'near', memo: 'archive', request_hash: null, ts_ns: '0', policy_version: 1, delivered: true, pending_id: 0, approved_by: 'owner.test',
         storage_deposit: null,
+        split: [],
       }),
     ).toBe('#3 pay 0.8 NEAR -> api.test [paid, delivered: pass] "archive"');
   });

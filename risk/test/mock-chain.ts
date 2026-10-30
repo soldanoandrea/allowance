@@ -123,6 +123,7 @@ export function receipt(id: number, payee: string, amount: string, extra: Record
     pending_id: null,
     approved_by: null,
     storage_deposit: null,
+    split: [],
     ...extra,
   };
 }

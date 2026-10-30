@@ -134,18 +134,7 @@ export async function bootstrapVault(options: BootstrapOptions): Promise<DemoVau
     await root.createAccount({ newAccountId: id, publicKey: rootPk, nearToTransfer: nearToYocto(amount) });
     log(`created ${id} (${amount} NEAR)`);
   }
-  const wasm = readFileSync(options.wasmPath ?? VAULT_WASM);
-  await root.signAndSendTransaction({
-    receiverId: ids.vaultId,
-    actions: [
-      actions.createAccount(),
-      actions.transfer(nearToYocto('10')),
-      actions.addFullAccessKey(rootPk),
-      actions.deployContract(wasm),
-      actions.functionCall('new', { owner_id: ids.ownerId }, teraToGas('30'), 0n),
-    ],
-  });
-  const codeHash = codeHashOf(wasm);
+  const codeHash = await deployVault({ node, accountId: ids.vaultId, ownerId: ids.ownerId, ...(options.wasmPath ? { wasmPath: options.wasmPath } : {}) });
   log(`deployed the vault contract on ${ids.vaultId} (code hash ${codeHash}), owner ${ids.ownerId}`);
 
   const owner = new OwnerClient({ vaultId: ids.vaultId, ownerId: ids.ownerId, rpcUrl: node.rpcUrl, ownerKey: node.rootSecretKey });
@@ -166,6 +155,38 @@ export async function bootstrapVault(options: BootstrapOptions): Promise<DemoVau
     agentPublicKey,
     codeHash,
   };
+}
+
+/** Create a sandbox account funded by the genesis account (its key is the genesis key). */
+export async function createSandboxAccount(node: Pick<SandboxNode, 'rpcUrl' | 'rootAccountId' | 'rootSecretKey'>, accountId: string, nearAmount: `${number}`): Promise<void> {
+  const root = new Account(node.rootAccountId, new JsonRpcProvider({ url: node.rpcUrl }), node.rootSecretKey);
+  await root.createAccount({ newAccountId: accountId, publicKey: KeyPair.fromString(node.rootSecretKey).getPublicKey(), nearToTransfer: nearToYocto(nearAmount) });
+}
+
+/**
+ * Create `accountId` with 10 NEAR, deploy the vault wasm and call `new`
+ * (`owner_id`). Returns the code hash. Sandbox only.
+ */
+export async function deployVault(options: {
+  node: Pick<SandboxNode, 'rpcUrl' | 'rootAccountId' | 'rootSecretKey'>;
+  accountId: string;
+  ownerId: string;
+  wasmPath?: string;
+}): Promise<string> {
+  const { node } = options;
+  const root = new Account(node.rootAccountId, new JsonRpcProvider({ url: node.rpcUrl }), node.rootSecretKey);
+  const wasm = readFileSync(options.wasmPath ?? VAULT_WASM);
+  await root.signAndSendTransaction({
+    receiverId: options.accountId,
+    actions: [
+      actions.createAccount(),
+      actions.transfer(nearToYocto('10')),
+      actions.addFullAccessKey(KeyPair.fromString(node.rootSecretKey).getPublicKey()),
+      actions.deployContract(wasm),
+      actions.functionCall('new', { owner_id: options.ownerId }, teraToGas('30'), 0n),
+    ],
+  });
+  return codeHashOf(wasm);
 }
 
 export interface DemoToken {

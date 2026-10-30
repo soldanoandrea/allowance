@@ -4,6 +4,7 @@ use near_sdk::json_types::{Base64VecU8, U64, U128};
 use near_sdk::{AccountId, NearToken, PublicKey, near};
 
 use crate::policy::{Asset, Policy, Rejection, SpendState};
+use crate::split::{Split, SplitPayout};
 
 /// Identity of an agent.
 ///
@@ -152,6 +153,8 @@ pub struct Receipt {
     /// the token (`storage_deposit` with `registration_only`; the token
     /// refunds what it does not use).
     pub storage_deposit: Option<NearToken>,
+    /// Income receipts: the revenue-split shares forwarded to beneficiaries.
+    pub split: Vec<SplitPayout>,
 }
 
 /// A payment waiting for human approval. No funds are reserved while pending;
@@ -240,6 +243,8 @@ pub struct VaultInfo {
     pub key_gas_allowance: NearToken,
     /// NEP-141 tokens the vault accepts, with the balance it accounts for.
     pub tokens: Vec<TokenView>,
+    /// Revenue split applied to every income, if any.
+    pub split: Option<Split>,
     pub block_timestamp_ns: U64,
     pub version: String,
 }

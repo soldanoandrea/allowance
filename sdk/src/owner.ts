@@ -1,7 +1,7 @@
 import type { KeyPairString } from 'near-api-js';
 
 import { FT_PAY_GAS, NearTransport, type CallOptions, type VaultTransport } from './transport.ts';
-import type { AgentId, AllowanceEvent, PayOutcome, Policy } from './types.ts';
+import type { AgentId, AllowanceEvent, PayOutcome, Policy, Split } from './types.ts';
 import { assertAccountId } from './validate.ts';
 
 export interface OwnerClientOptions {
@@ -85,6 +85,11 @@ export class OwnerClient {
 
   removeAgent(agentId: AgentId): Promise<OwnerTx<null>> {
     return this.#call('remove_agent', { agent_id: agentId });
+  }
+
+  /** Set (or with null remove) the revenue split applied to every income. */
+  setSplit(split: Split | null): Promise<OwnerTx<null>> {
+    return this.#call('set_split', { split });
   }
 
   setDenylist(accounts: string[]): Promise<OwnerTx<null>> {

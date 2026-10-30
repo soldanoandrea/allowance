@@ -77,7 +77,11 @@ export function describePolicy(policy: Policy): string[] {
     lines.push(`budget ${fmt(policy.budget.amount)} per ${duration(policy.budget.period_ns)}`);
   }
   const allow = policy.allow ?? 'any';
-  lines.push(allow === 'any' ? 'any payee (denylist applies)' : `payees: ${allow.list.map((e) => e.account_id).join(', ')}`);
+  lines.push(
+    allow === 'any'
+      ? 'any payee (denylist applies)'
+      : `payees: ${allow.list.map((e) => (e.methods?.includes('deposit') ? `${e.account_id} (vault, via deposit)` : e.account_id)).join(', ')}`,
+  );
   if (policy.approval_threshold) lines.push(`human approval above ${fmt(policy.approval_threshold)}`);
   if (policy.cooldown_ns && policy.cooldown_ns !== '0') lines.push(`cooldown ${duration(policy.cooldown_ns)}`);
   if (policy.time_window) {
@@ -111,5 +115,11 @@ export function iso(ns: string): string {
 export function describeReceipt(r: Receipt): string {
   const delivered = r.delivered === null ? '' : r.delivered ? ', delivered: pass' : ', delivered: FAIL';
   const memo = r.memo ? ` "${r.memo}"` : '';
-  return `#${r.id} ${r.kind} ${formatAmount(r.amount, r.asset)} -> ${r.payee} [${describeStatus(r.status)}${delivered}]${memo}`;
+  const split = r.split?.length ? `; split: ${describeSplit(r)}` : '';
+  return `#${r.id} ${r.kind} ${formatAmount(r.amount, r.asset)} -> ${r.payee} [${describeStatus(r.status)}${delivered}]${memo}${split}`;
+}
+
+/** "carol.near 0.1 NEAR (paid), dave.near 0.05 NEAR (failed)". */
+export function describeSplit(r: Pick<Receipt, 'split' | 'asset'>): string {
+  return (r.split ?? []).map((p) => `${p.account_id} ${formatAmount(p.amount, r.asset)} (${p.status})`).join(', ');
 }

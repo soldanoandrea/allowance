@@ -93,6 +93,7 @@ export class FakeVault implements VaultTransport {
         pending_id: null,
         approved_by: null,
         storage_deposit: null,
+        split: [],
       };
       let outcome: PayOutcome;
       if (verdict === 'block') {

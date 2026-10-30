@@ -58,8 +58,13 @@ impl Budget {
     }
 }
 
-/// One allowlisted payee. `methods` is reserved for function-call payments and
-/// ignored for plain NEAR transfers and NEP-141 `ft_transfer`s.
+/// One allowlisted payee.
+///
+/// `methods: ["deposit"]` marks the payee as another Allowance vault: NEAR
+/// payments then call its `deposit` (with the amount attached) instead of a
+/// plain transfer, so the receiving vault records the income and applies its
+/// revenue split. Token payments always use `ft_transfer`. No other method
+/// is accepted.
 #[near(serializers = [json, borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowEntry {
@@ -85,6 +90,19 @@ impl Allow {
         match self {
             Allow::Any => true,
             Allow::List(entries) => entries.iter().any(|e| &e.account_id == payee),
+        }
+    }
+
+    /// True when the allowlist says to pay `payee` through its `deposit`.
+    pub fn pays_via_deposit(&self, payee: &AccountId) -> bool {
+        match self {
+            Allow::Any => false,
+            Allow::List(entries) => entries.iter().any(|e| {
+                &e.account_id == payee
+                    && e.methods
+                        .as_ref()
+                        .is_some_and(|m| m.iter().any(|x| x == "deposit"))
+            }),
         }
     }
 }
@@ -217,10 +235,20 @@ impl Policy {
                 return Err("budget.amount must be greater than zero".into());
             }
         }
-        if let Allow::List(entries) = &self.allow
-            && entries.is_empty()
-        {
-            return Err("allow.list must not be empty (use `any` or disable the agent)".into());
+        if let Allow::List(entries) = &self.allow {
+            if entries.is_empty() {
+                return Err("allow.list must not be empty (use `any` or disable the agent)".into());
+            }
+            if entries.iter().any(|e| {
+                e.methods
+                    .as_ref()
+                    .is_some_and(|m| m.iter().any(|x| x != "deposit"))
+            }) {
+                return Err(
+                    "allow.list methods: only [\"deposit\"] (pay another Allowance vault) is supported"
+                        .into(),
+                );
+            }
         }
         if let Some(window) = &self.time_window {
             if window.start_h >= window.end_h || window.end_h > 24 {

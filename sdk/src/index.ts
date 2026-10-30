@@ -23,7 +23,7 @@ export { requestHash, newNonce, isRequestHash } from './hash.ts';
 export { loadKey, AGENT_KEY_ENV, OWNER_KEY_ENV, type LoadedKey, type KeySource } from './keys.ts';
 export { parseNear, parseAmount, parseUnits, formatNear, formatUnits, near, toYocto, nsToDate, YOCTO_PER_NEAR } from './units.ts';
 export { buildPolicy, parseDuration, type PolicySpec } from './policy.ts';
-export { describeRejection, describeFailure, describeStatus, describeAgent, describePolicy, describeReceipt, shortKey, duration, iso } from './describe.ts';
+export { describeRejection, describeFailure, describeSplit, describeStatus, describeAgent, describePolicy, describeReceipt, shortKey, duration, iso } from './describe.ts';
 export { isAccountId } from './validate.ts';
 export {
   PAYMENT_SCHEME,

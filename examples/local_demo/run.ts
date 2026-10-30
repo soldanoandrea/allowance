@@ -12,7 +12,10 @@
  *      6 decimals), buys a dataset priced in it; the vault registers the API
  *      on the token (storage_deposit) and pays with ft_transfer
  *   5. run the attack demo (sdk/examples/attack.ts)
- *   6. print the receipts, check them, print the ledger page URL, stop everything
+ *   6. business: the API operator keeps its revenue in its own Allowance
+ *      vault with a revenue split; the agent pays that vault vault-to-vault
+ *      (through its `deposit`) and the split forwards 10% / 5% shares
+ *   7. print the receipts, check them, print the ledger page URL, stop everything
  *
  * Flags: --keep (leave the chain and API running until Ctrl+C),
  *        --update-docs (write the attack transcript to docs/attack-log.md),
@@ -37,7 +40,9 @@ import {
   OwnerClient,
   buildPolicy,
   describeReceipt,
+  describeSplit,
   formatAmount,
+  guardedPay,
   parseNear,
   parseUnits,
   sleep,
@@ -48,6 +53,8 @@ import {
   REPO_ROOT,
   bootstrapToken,
   bootstrapVault,
+  createSandboxAccount,
+  deployVault,
   sandboxPrerequisites,
   startSandboxNode,
   tokenPrerequisites,
@@ -269,7 +276,32 @@ try {
     say('attack transcript written to docs/attack-log.md');
   }
 
-  step('6. receipts on-chain');
+  step('6. business: revenue split, vault to vault');
+  const shopId = `shop.${node.rootAccountId}`;
+  const providerId = `provider.${node.rootAccountId}`;
+  const opsId = `ops.${node.rootAccountId}`;
+  await createSandboxAccount(node, providerId, '1');
+  await createSandboxAccount(node, opsId, '1');
+  await deployVault({ node, accountId: shopId, ownerId: demo.payeeId });
+  say(`${demo.payeeId} (the API operator) keeps its revenue in its own vault ${shopId}`);
+  const shopOwner = new OwnerClient({ vaultId: shopId, ownerId: demo.payeeId, rpcUrl: node.rpcUrl, ownerKey: demo.ownerSecretKey });
+  await shopOwner.setSplit({ beneficiaries: [{ account_id: providerId, bps: 1000 }, { account_id: opsId, bps: 500 }] });
+  say(`revenue split on ${shopId}: 10% of every income to ${providerId} (data provider), 5% to ${opsId}`);
+  await owner.setPolicy(
+    { key: demo.agentPublicKey },
+    buildPolicy({ perTxCap: '1', budget: { amount: '2', period: '1d' }, allow: [demo.payeeId], allowVaults: [shopId], approvalThreshold: '0.5' }),
+  );
+  say(`owner allowlists ${shopId} as a vault payee (paid through its deposit): policy v2`);
+  const providerBefore = BigInt((await new JsonRpcProvider({ url: node.rpcUrl }).viewAccount({ accountId: providerId })).amount);
+  const worker = new AllowanceClient({ vaultId: demo.vaultId, rpcUrl: node.rpcUrl, agentKey: demo.agentSecretKey });
+  const shopPay = await guardedPay(worker, { payee: shopId, amount: parseNear('0.1'), memo: 'monthly data-partner fee' }, (l) => console.log(`[agent] ${l}`));
+  const shopReader = new AllowanceClient({ vaultId: shopId, rpcUrl: node.rpcUrl });
+  const shopIncome = (await shopReader.receipts()).find((r) => r.kind === 'income' && r.split.length > 0);
+  if (shopIncome) say(`${shopId} receipt: ${describeReceipt(shopIncome)}`);
+  const providerGain =
+    BigInt((await new JsonRpcProvider({ url: node.rpcUrl }).viewAccount({ accountId: providerId })).amount) - providerBefore;
+
+  step('7. receipts on-chain');
   await cli(['receipts', '--vault', demo.vaultId, '--rpc', node.rpcUrl], { out: console.log, err: console.error, env: {} });
 
   console.log('\nchecks');
@@ -290,6 +322,14 @@ try {
   );
   check(!pays.some((r) => r.payee === demo.attackerId && r.status.status === 'paid'), 'no payment to the attacker was ever made');
   check(attack.code === 0, 'attack demo: attacker balance unchanged, owner methods refused by the protocol');
+  check(
+    shopPay.status === 'sent' &&
+      shopPay.result.outcome.outcome === 'paid' &&
+      shopIncome?.amount === parseNear('0.1').toString() &&
+      shopIncome.split.every((p) => p.status === 'paid') &&
+      providerGain === parseNear('0.01'),
+    `business: vault-to-vault payment of 0.1 NEAR into ${shopId}, whose split forwarded 10% / 5% in the same transaction${shopIncome ? ` (${describeSplit(shopIncome)})` : ''}`,
+  );
   check(
     /counterparty check attacker\.\S+: BLOCK/.test(attack.output) && pays.filter((r) => r.payee === demo.payeeId).every((r) => r.memo.includes('risk=')),
     'counterparty-risk check: attacker blocked by the deny-list before simulate; every API payment carries the risk verdict in its receipt memo',

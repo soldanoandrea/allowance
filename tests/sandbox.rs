@@ -1311,3 +1311,145 @@ async fn nep141_payments_register_the_payee_and_settle_like_near() -> TestResult
     );
     Ok(())
 }
+
+// ----------------------------------------------------------------------
+// 9. Revenue split on income, and vault-to-vault payments via `deposit`
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn revenue_split_forwards_shares_of_income_including_vault_to_vault_payments()
+-> TestResult<()> {
+    let env = Env::new().await?;
+    // A second vault: the revenue account of a business ("shop").
+    let shopkeeper = create_account(&env.sandbox, "shopkeeper.sandbox").await?;
+    let shop = create_account(&env.sandbox, "shop.sandbox").await?;
+    Contract::deploy(shop.clone())
+        .use_code(wasm().to_vec())
+        .with_init_call("new", json!({"owner_id": shopkeeper}))?
+        .with_signer(env.root.clone())
+        .send_to(&env.network)
+        .await?
+        .assert_success();
+    let carol = create_account(&env.sandbox, "carol.sandbox").await?;
+    let dave = create_account(&env.sandbox, "dave.sandbox").await?;
+
+    // 10% to carol (data provider), 5% to dave (ops).
+    let (_, logs) = env
+        .call_contract(
+            &shopkeeper,
+            &shop,
+            "set_split",
+            json!({"split": {"beneficiaries": [{"account_id": carol, "bps": 1000}, {"account_id": dave, "bps": 500}]}}),
+            NearToken::from_yoctonear(0),
+            30,
+        )
+        .await?;
+    assert!(has_event(&logs, "split_set"));
+
+    // A customer pays the shop 1 NEAR through deposit.
+    let (carol0, dave0) = (env.balance(&carol).await?, env.balance(&dave).await?);
+    let (value, logs) = env
+        .call_contract(&env.payee, &shop, "deposit", json!({}), near(1), 100)
+        .await?;
+    assert_eq!(value, json!(0));
+    assert_eq!(
+        logs.iter()
+            .filter(|l| l.contains("\"event\":\"split_settled\"") && l.contains("\"paid\":true"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        env.balance(&carol).await?,
+        carol0.saturating_add(millinear(100))
+    );
+    assert_eq!(
+        env.balance(&dave).await?,
+        dave0.saturating_add(millinear(50))
+    );
+    let income: Value = Contract(shop.clone())
+        .call_function("get_receipt", json!({"receipt_id": 0}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await?
+        .data;
+    assert_eq!(income["kind"], json!("income"));
+    assert_eq!(
+        income["split"],
+        json!([
+            {"account_id": carol, "bps": 1000, "amount": yocto(millinear(100)), "status": "paid"},
+            {"account_id": dave, "bps": 500, "amount": yocto(millinear(50)), "status": "paid"},
+        ])
+    );
+
+    // An agent of the buyer vault pays the shop vault-to-vault: its
+    // allowlist marks the shop with methods ["deposit"].
+    env.deposit(&env.owner, near(5)).await?;
+    let agent = AgentKey::generate()?;
+    let mut policy = worker_policy(&env.payee);
+    policy["allow"] = json!({"list": [
+        {"account_id": shop, "methods": ["deposit"]},
+        {"account_id": env.payee, "methods": ["deposit"]},
+    ]});
+    env.add_key_agent(&agent, "buyer", policy).await?;
+    let (carol1, dave1) = (env.balance(&carol).await?, env.balance(&dave).await?);
+    let (outcome, logs) = env.agent_pay(&agent, &shop, millinear(400)).await?;
+    assert_eq!(outcome, json!({"outcome": "paid", "receipt_id": 1}));
+    assert!(has_event(&logs, "payment_paid"));
+    let income: Value = Contract(shop.clone())
+        .call_function("get_receipt", json!({"receipt_id": 1}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await?
+        .data;
+    assert_eq!(income["agent"], json!({"account": env.vault_id()}));
+    assert_eq!(token(&income["amount"]), millinear(400));
+    assert_eq!(income["split"][0]["status"], json!("paid"));
+    assert_eq!(
+        env.balance(&carol).await?,
+        carol1.saturating_add(millinear(40))
+    );
+    assert_eq!(
+        env.balance(&dave).await?,
+        dave1.saturating_add(millinear(20))
+    );
+
+    // "deposit" to an account that is not a vault fails cleanly: the NEAR
+    // comes back, the budget is released, the receipt says why.
+    let payee_before = env.balance(&env.payee).await?;
+    let (outcome, _) = env.agent_pay(&agent, &env.payee, millinear(10)).await?;
+    assert_eq!(
+        outcome,
+        json!({"outcome": "failed", "receipt_id": 2, "reason": "transfer_failed"})
+    );
+    assert_eq!(env.balance(&env.payee).await?, payee_before);
+    let state: Value = env
+        .view("get_agent_state", json!({"agent_id": agent.id()}))
+        .await?;
+    assert_eq!(token(&state["spent_in_window"]), millinear(400));
+
+    // A share to an account that does not exist stays in the vault.
+    env.call_contract(
+        &shopkeeper,
+        &shop,
+        "set_split",
+        json!({"split": {"beneficiaries": [{"account_id": "ghost.sandbox", "bps": 2000}]}}),
+        NearToken::from_yoctonear(0),
+        30,
+    )
+    .await?;
+    let (_, logs) = env
+        .call_contract(&env.payee, &shop, "deposit", json!({}), near(1), 100)
+        .await?;
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("\"event\":\"split_settled\"") && l.contains("\"paid\":false"))
+    );
+    let income: Value = Contract(shop.clone())
+        .call_function("get_receipt", json!({"receipt_id": 2}))
+        .read_only()
+        .fetch_from(&env.network)
+        .await?
+        .data;
+    assert_eq!(income["split"][0]["status"], json!("failed"));
+    Ok(())
+}

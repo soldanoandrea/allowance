@@ -8,6 +8,7 @@ use near_sdk::json_types::{U64, U128};
 use near_sdk::{AccountId, NearToken, near};
 
 use crate::policy::{Asset, Rejection};
+use crate::split::Split;
 use crate::types::{AgentId, Failure};
 
 #[near(event_json(standard = "allowance"))]
@@ -117,6 +118,19 @@ pub enum Event {
     },
     /// The vault is registering a payee on a token before paying it
     /// (`storage_deposit`, NEP-145), as the agent's policy allows.
+    /// The owner set or removed the revenue split.
+    #[event_version("1.0.0")]
+    SplitSet { split: Option<Split> },
+    /// A revenue-split share of an income receipt reached its beneficiary
+    /// (`paid: true`) or stayed in the vault (`paid: false`).
+    #[event_version("1.0.0")]
+    SplitSettled {
+        receipt_id: u64,
+        beneficiary: AccountId,
+        amount: NearToken,
+        asset: Asset,
+        paid: bool,
+    },
     #[event_version("1.0.0")]
     FtPayeeRegistration {
         receipt_id: u64,

@@ -318,3 +318,45 @@ design says.
     (what `make test` and CI run) adds the factory's unit tests. No
     TypeScript client for the factory yet: the testnet scripts deploy a
     vault directly.
+
+### Revenue split (`src/split.rs`)
+
+64. **Vault-wide rule on income**, set by the owner with `set_split`: up to 4
+    beneficiaries with shares in basis points (total <= 100%, no duplicates,
+    not the vault itself). It applies to every income: `deposit` (NEAR) and
+    `ft_on_transfer` (tokens). Shares are rounded down; zero shares are
+    skipped; the vault keeps the remainder. Per-agent splits were rejected:
+    income is not tied to an agent.
+65. **The income receipt records the split** (`split: [{account_id, bps,
+    amount, status}]`); all share transfers are issued at once, joined with
+    `Promise::and`, with one settlement callback (`on_split_settled`) that
+    marks each share `paid` or `failed` and emits `split_settled`. A failed
+    NEAR share is refunded to the vault by the protocol; a failed token
+    share is credited back to the vault's token accounting (token shares are
+    debited before the transfers so agents cannot spend them meanwhile).
+66. **"Vault as payee"**: a plain NEAR transfer runs no code on the receiver,
+    so a vault paid that way could not split. An allowlist entry with
+    `methods: ["deposit"]` (the field DESIGN reserved for function-call
+    payments) makes the paying vault call the payee vault's `deposit` with
+    the amount attached (40 TGas); the payee records the income and applies
+    its split in the same receipt tree. `deposit` on an account that is not
+    a vault fails, the NEAR comes back, the payment settles as `failed
+    {transfer_failed}` and the budget is released. No other method is
+    accepted in `methods`, so the field cannot become a generic call gate.
+    Token payments still use `ft_transfer` (an `ft_transfer_call` path
+    would need the "unused amount" accounting of NEP-141 resolution).
+67. **Gas**: a split deposit needs the shares' transfers plus a 10 TGas
+    callback; with 4 beneficiaries and a token, send `ft_transfer_call` with
+    150 TGas. This is why beneficiaries are capped at 4.
+68. **Bug found and fixed while adding this**: near-sdk schedules a
+    `Promise` when it is dropped, so building the `ft_transfer` and the
+    settlement callback before choosing a branch (as the first NEP-141
+    version did) would have sent the transfer even on the
+    `payee_not_registered` / `storage_check_failed` paths, and a stray
+    `on_paid` without a promise result. Promises are now built only on the
+    branch that returns them; unit tests assert that a failed payment
+    schedules nothing.
+69. `make demo` adds a business step: the API operator's revenue vault
+    `shop.sandbox` with a 10% / 5% split; the worker's policy allowlists it
+    as a vault payee (policy v2) and pays it 0.1 NEAR; the provider receives
+    exactly 0.01 NEAR in the same transaction (11 checks in total).

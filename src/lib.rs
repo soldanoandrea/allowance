@@ -16,6 +16,7 @@
 
 pub mod events;
 pub mod policy;
+pub mod split;
 pub mod types;
 
 use near_sdk::json_types::{Base64VecU8, U64, U128};
@@ -27,6 +28,7 @@ use near_sdk::{
 
 use events::Event;
 use policy::{Asset, Decision, EvalContext, NS_PER_SEC, PayRequest, Policy, Rejection, evaluate};
+use split::{Split, SplitPayout, SplitStatus};
 use types::{
     Agent, AgentId, AgentView, Failure, PayOutcome, Pending, PingResponse, Receipt, ReceiptKind,
     ReceiptStatus, Simulation, TokenAccount, TokenView, VaultInfo, Verdict,
@@ -64,6 +66,12 @@ const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(15);
 const GAS_FOR_FT_STEP: Gas = Gas::from_tgas(50);
 /// NEP-141 requires exactly one yoctoNEAR on `ft_transfer`.
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+/// A payment to another Allowance vault through its `deposit` (its revenue
+/// split forwards shares in the same receipt tree).
+const GAS_FOR_VAULT_DEPOSIT: Gas = Gas::from_tgas(40);
+/// One `ft_transfer` of a revenue-split share.
+const GAS_FOR_SPLIT_FT_TRANSFER: Gas = Gas::from_tgas(10);
+const GAS_FOR_SPLIT_CALLBACK: Gas = Gas::from_tgas(10);
 /// Longest promise result read from a token contract (defensive bound).
 const MAX_TOKEN_RESULT_BYTES: usize = 1_024;
 const DEFAULT_PAGE: u64 = 50;
@@ -104,6 +112,8 @@ pub struct Vault {
     next_pending_id: u64,
     /// NEP-141 tokens the owner registered, with the vault's own accounting.
     tokens: IterableMap<AccountId, TokenAccount>,
+    /// Revenue split applied to every income (deposit / ft_on_transfer).
+    split: Option<Split>,
 }
 
 #[near]
@@ -145,6 +155,7 @@ impl Vault {
             pending: IterableMap::new(StorageKey::Pending),
             next_pending_id: 0,
             tokens: IterableMap::new(StorageKey::Tokens),
+            split: None,
         }
     }
 
@@ -153,7 +164,9 @@ impl Vault {
     // ------------------------------------------------------------------
 
     /// Fund the vault. Anyone may deposit; the deposit is recorded as an
-    /// `income` receipt. Returns the receipt id.
+    /// `income` receipt. If the owner set a revenue split, the shares are
+    /// forwarded to the beneficiaries right away and recorded on that
+    /// receipt. Returns the receipt id.
     #[payable]
     pub fn deposit(&mut self) -> u64 {
         let amount = env::attached_deposit();
@@ -178,6 +191,7 @@ impl Vault {
             pending_id: None,
             approved_by: None,
             storage_deposit: None,
+            split: Vec::new(),
         });
         Event::VaultFunded {
             from,
@@ -186,7 +200,33 @@ impl Vault {
             receipt_id,
         }
         .emit();
+        self.split_income(receipt_id, &Asset::Near, amount.as_yoctonear());
         receipt_id
+    }
+
+    /// Owner: set (or with `null` remove) the revenue split: a share of
+    /// every income, in basis points, forwarded to up to 4 beneficiaries.
+    pub fn set_split(&mut self, split: Option<Split>) {
+        self.assert_owner();
+        if let Some(rule) = &split
+            && let Err(msg) = rule.validate(&env::current_account_id())
+        {
+            env::panic_str(&msg);
+        }
+        self.split = split.clone();
+        Event::SplitSet { split }.emit();
+    }
+
+    /// Callback of the revenue-split transfers of income receipt
+    /// `receipt_id`: one promise result per share, in order. A failed share
+    /// stays in the vault (NEAR is refunded by the protocol, tokens are
+    /// credited back to the vault's accounting).
+    #[private]
+    pub fn on_split_settled(&mut self, receipt_id: u64) {
+        let results: Vec<bool> = (0..env::promise_results_count())
+            .map(|i| !matches!(env::promise_result_checked(i, 0), Err(PromiseError::Failed)))
+            .collect();
+        self.settle_split(receipt_id, &results);
     }
 
     /// Owner: move funds out of the vault (to the owner unless `to` is given).
@@ -216,6 +256,7 @@ impl Vault {
             pending_id: None,
             approved_by: None,
             storage_deposit: None,
+            split: Vec::new(),
         });
         Event::Withdrawn {
             to: to.clone(),
@@ -311,14 +352,16 @@ impl Vault {
             pending_id: None,
             approved_by: None,
             storage_deposit: None,
+            split: Vec::new(),
         });
         Event::VaultFunded {
             from: sender_id,
             amount: NearToken::from_yoctonear(amount.0),
-            asset,
+            asset: asset.clone(),
             receipt_id,
         }
         .emit();
+        self.split_income(receipt_id, &asset, amount.0);
         PromiseOrValue::Value(U128(0))
     }
 
@@ -361,6 +404,7 @@ impl Vault {
             pending_id: None,
             approved_by: None,
             storage_deposit: None,
+            split: Vec::new(),
         });
         let vault = env::current_account_id();
         ext_ft::ext(token_id)
@@ -865,6 +909,7 @@ impl Vault {
             pending_id: None,
             approved_by: None,
             storage_deposit: None,
+            split: Vec::new(),
         };
         match decision {
             Err(reason) => {
@@ -1122,6 +1167,7 @@ impl Vault {
                 .iter()
                 .map(|(id, t)| token_view(id, t))
                 .collect(),
+            split: self.split.clone(),
             block_timestamp_ns: U64(env::block_timestamp()),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -1377,27 +1423,44 @@ impl Vault {
         asset: Asset,
     ) -> PromiseOrValue<PayOutcome> {
         let now = env::block_timestamp();
-        let (window_start_ns, ft_storage_deposit) = {
+        let (window_start_ns, ft_storage_deposit, via_deposit) = {
             let agent = self.agent_mut(&agent_id);
             agent
                 .state
                 .record_payment(agent.policy.budget.as_ref(), amount, now);
-            (agent.state.window_start_ns, agent.policy.ft_storage_deposit)
+            (
+                agent.state.window_start_ns,
+                agent.policy.ft_storage_deposit,
+                agent.policy.allow.pays_via_deposit(&payee),
+            )
         };
         let vault = env::current_account_id();
+        // Built only where it is used: near-sdk schedules a Promise when it
+        // is dropped, so an unused one would still run.
+        let settle = || {
+            Self::ext(vault.clone())
+                .with_static_gas(GAS_FOR_PAY_CALLBACK)
+                .on_paid(receipt_id, agent_id.clone(), amount, window_start_ns)
+        };
         let promise = match asset {
-            Asset::Near => Promise::new(payee).transfer(amount).then(
-                Self::ext(vault)
-                    .with_static_gas(GAS_FOR_PAY_CALLBACK)
-                    .on_paid(receipt_id, agent_id, amount, window_start_ns),
-            ),
+            // The payee is another Allowance vault: pay through its
+            // `deposit`, so it records the income (and applies its split).
+            Asset::Near if via_deposit => Promise::new(payee)
+                .function_call(
+                    "deposit".to_string(),
+                    b"{}".to_vec(),
+                    amount,
+                    GAS_FOR_VAULT_DEPOSIT,
+                )
+                .then(settle()),
+            Asset::Near => Promise::new(payee).transfer(amount).then(settle()),
             Asset::Ft(token_id) => {
                 self.ft_debit(&token_id, amount.as_yoctonear());
                 ext_ft::ext(token_id)
                     .with_static_gas(GAS_FOR_FT_STORAGE_CHECK)
                     .storage_balance_of(payee)
                     .then(
-                        Self::ext(vault)
+                        Self::ext(vault.clone())
                             .with_static_gas(GAS_FOR_FT_STEP)
                             .on_ft_storage_checked(
                                 receipt_id,
@@ -1445,19 +1508,26 @@ impl Vault {
             return fail(self, Failure::StorageCheckFailed);
         };
         let vault = env::current_account_id();
-        let transfer = ext_ft::ext(token_id.clone())
-            .with_attached_deposit(ONE_YOCTO)
-            .with_static_gas(GAS_FOR_FT_TRANSFER)
-            .ft_transfer(
-                receipt.payee.clone(),
-                U128(amount.as_yoctonear()),
-                Some(format!("allowance:{vault}#{receipt_id}")),
-            );
-        let settle = Self::ext(vault)
-            .with_static_gas(GAS_FOR_PAY_CALLBACK)
-            .on_paid(receipt_id, agent_id.clone(), amount, window_start_ns);
+        // Built only on the paths that use them: near-sdk schedules a Promise
+        // when it is dropped, so building them up front would send the
+        // transfer even when this payment fails.
+        let transfer = || {
+            ext_ft::ext(token_id.clone())
+                .with_attached_deposit(ONE_YOCTO)
+                .with_static_gas(GAS_FOR_FT_TRANSFER)
+                .ft_transfer(
+                    receipt.payee.clone(),
+                    U128(amount.as_yoctonear()),
+                    Some(format!("allowance:{vault}#{receipt_id}")),
+                )
+        };
+        let settle = || {
+            Self::ext(vault.clone())
+                .with_static_gas(GAS_FOR_PAY_CALLBACK)
+                .on_paid(receipt_id, agent_id.clone(), amount, window_start_ns)
+        };
         if registered {
-            return PromiseOrValue::Promise(transfer.then(settle));
+            return PromiseOrValue::Promise(transfer().then(settle()));
         }
         let Some(deposit) = ft_storage_deposit else {
             return fail(self, Failure::PayeeNotRegistered);
@@ -1477,13 +1547,90 @@ impl Vault {
         // failed, the transfer fails too and `on_paid` releases everything
         // (the attached NEAR comes back to the vault with the failed call).
         PromiseOrValue::Promise(
-            ext_ft::ext(token_id)
+            ext_ft::ext(token_id.clone())
                 .with_attached_deposit(deposit)
                 .with_static_gas(GAS_FOR_FT_STORAGE_DEPOSIT)
-                .storage_deposit(Some(receipt.payee), Some(true))
-                .then(transfer)
-                .then(settle),
+                .storage_deposit(Some(receipt.payee.clone()), Some(true))
+                .then(transfer())
+                .then(settle()),
         )
+    }
+
+    /// Apply the revenue split to an income receipt: record the shares on it
+    /// and issue one transfer per share (joined, one settlement callback).
+    fn split_income(&mut self, receipt_id: u64, asset: &Asset, amount: u128) {
+        let Some(rule) = &self.split else {
+            return;
+        };
+        let payouts = rule.payouts(amount);
+        if payouts.is_empty() {
+            return;
+        }
+        let total: u128 = payouts.iter().map(|p| p.amount.as_yoctonear()).sum();
+        if let Asset::Ft(token_id) = asset {
+            // Out of the agents' reach right away; credited back if a share fails.
+            self.ft_debit(token_id, total);
+        }
+        let vault = env::current_account_id();
+        let mut joint: Option<Promise> = None;
+        for payout in &payouts {
+            let share = match asset {
+                Asset::Near => Promise::new(payout.account_id.clone()).transfer(payout.amount),
+                Asset::Ft(token_id) => ext_ft::ext(token_id.clone())
+                    .with_attached_deposit(ONE_YOCTO)
+                    .with_static_gas(GAS_FOR_SPLIT_FT_TRANSFER)
+                    .ft_transfer(
+                        payout.account_id.clone(),
+                        U128(payout.amount.as_yoctonear()),
+                        Some(format!("allowance:{vault}#{receipt_id} split")),
+                    ),
+            };
+            joint = Some(match joint {
+                None => share,
+                Some(previous) => previous.and(share),
+            });
+        }
+        self.update_receipt(receipt_id, |r| r.split = payouts);
+        if let Some(joint) = joint {
+            joint
+                .then(
+                    Self::ext(vault)
+                        .with_static_gas(GAS_FOR_SPLIT_CALLBACK)
+                        .on_split_settled(receipt_id),
+                )
+                .detach();
+        }
+    }
+
+    fn settle_split(&mut self, receipt_id: u64, results: &[bool]) {
+        let receipt = self
+            .receipts
+            .get(&receipt_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("receipt missing in callback"));
+        let mut payouts: Vec<SplitPayout> = receipt.split.clone();
+        for (payout, ok) in payouts.iter_mut().zip(results.iter()) {
+            if payout.status != SplitStatus::Pending {
+                continue;
+            }
+            payout.status = if *ok {
+                SplitStatus::Paid
+            } else {
+                SplitStatus::Failed
+            };
+            if !*ok && let Asset::Ft(token_id) = &receipt.asset {
+                self.ft_credit(token_id, payout.amount.as_yoctonear());
+            }
+            let event = Event::SplitSettled {
+                receipt_id,
+                beneficiary: payout.account_id.clone(),
+                amount: payout.amount,
+                asset: receipt.asset.clone(),
+                paid: *ok,
+            };
+            event.emit();
+        }
+        self.update_receipt(receipt_id, |r| r.split = payouts);
     }
 
     /// Settle a payment once the transfer (NEAR or `ft_transfer`) finished.
@@ -1584,7 +1731,7 @@ fn truncate_utf8(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::test_utils::{VMContextBuilder, get_logs};
+    use near_sdk::test_utils::{VMContextBuilder, get_created_receipts, get_logs};
     use near_sdk::testing_env;
     use policy::{Allow, AllowEntry, Budget};
 
@@ -2193,6 +2340,44 @@ mod tests {
         );
     }
 
+    /// The receipts the last call scheduled, as `receiver:method+method` (method
+    /// names decoded, other actions in Debug form).
+    fn scheduled() -> String {
+        get_created_receipts()
+            .iter()
+            .map(|r| {
+                let actions: Vec<String> = r
+                    .actions
+                    .iter()
+                    .map(|a| match a {
+                        near_sdk::mock::MockAction::FunctionCallWeight {
+                            method_name,
+                            attached_deposit,
+                            ..
+                        } => format!(
+                            "{}({})",
+                            String::from_utf8_lossy(method_name),
+                            attached_deposit.as_yoctonear()
+                        ),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                format!("{}:{}", r.receiver_id, actions.join("+"))
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn set_callback_results(builder: VMContextBuilder, results: Vec<near_sdk::PromiseResult>) {
+        testing_env!(
+            builder.build(),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            results,
+        );
+    }
+
     fn ok(bytes: &[u8]) -> near_sdk::PromiseResult {
         near_sdk::PromiseResult::Successful(bytes.to_vec())
     }
@@ -2318,6 +2503,14 @@ mod tests {
 
         let (id, window) = usd_pay(&mut vault, usd(2));
         assert_eq!(id, 2);
+        let scheduled = scheduled();
+        assert!(
+            scheduled.contains("storage_balance_of") && scheduled.contains("on_ft_storage_checked")
+        );
+        assert!(
+            !scheduled.contains("on_paid") && !scheduled.contains("ft_transfer"),
+            "only the storage check is scheduled at this point"
+        );
         // Tokens and budget are reserved before any cross-contract call.
         assert_eq!(token_balance(&vault), usd(98));
         assert_eq!(
@@ -2378,6 +2571,10 @@ mod tests {
         assert_eq!(
             vault.get_receipt(id).unwrap().status,
             ReceiptStatus::Failed { reason }
+        );
+        assert!(
+            get_created_receipts().is_empty(),
+            "a failed payment schedules nothing (no stray ft_transfer or on_paid)"
         );
         assert_eq!(token_balance(&vault), usd(100), "tokens released");
         assert_eq!(
@@ -2446,6 +2643,7 @@ mod tests {
                 }
                 _ => panic!("expected a failure value"),
             }
+            assert!(get_created_receipts().is_empty(), "nothing scheduled");
         }
         assert_eq!(token_balance(&vault), usd(100));
     }
@@ -2487,6 +2685,158 @@ mod tests {
         let mut vault = vault_with_usd_worker();
         set_caller(owner(), T0);
         let _ = vault.withdraw_ft(token(), U128(usd(101).as_yoctonear()), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Revenue split and vault-to-vault payments
+    // ------------------------------------------------------------------
+
+    fn split_rule() -> Split {
+        Split {
+            beneficiaries: vec![
+                split::SplitShare {
+                    account_id: acc("carol.test"),
+                    bps: 1_000,
+                },
+                split::SplitShare {
+                    account_id: acc("dave.test"),
+                    bps: 500,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn deposits_are_split_and_the_receipt_records_each_share() {
+        let mut vault = vault_with_worker();
+        set_caller(owner(), T0);
+        vault.set_split(Some(split_rule()));
+        assert_eq!(vault.get_vault().split, Some(split_rule()));
+
+        testing_env!(
+            context(acc("customer.test"), T0)
+                .attached_deposit(near(1))
+                .build()
+        );
+        let id = vault.deposit();
+        let receipt = vault.get_receipt(id).unwrap();
+        assert_eq!(receipt.kind, ReceiptKind::Income);
+        assert_eq!(receipt.amount, near(1));
+        let shares: Vec<(AccountId, NearToken, SplitStatus)> = receipt
+            .split
+            .iter()
+            .map(|p| (p.account_id.clone(), p.amount, p.status))
+            .collect();
+        assert_eq!(
+            shares,
+            vec![
+                (acc("carol.test"), millinear(100), SplitStatus::Pending),
+                (acc("dave.test"), millinear(50), SplitStatus::Pending),
+            ]
+        );
+        let scheduled = scheduled();
+        assert!(scheduled.contains("carol.test") && scheduled.contains("dave.test"));
+        assert!(scheduled.contains("on_split_settled"));
+
+        // carol's share arrives, dave's account does not exist.
+        set_callback_results(
+            context(vault_id(), T0 + 1),
+            vec![ok(b""), near_sdk::PromiseResult::Failed],
+        );
+        vault.on_split_settled(id);
+        let statuses: Vec<SplitStatus> = vault
+            .get_receipt(id)
+            .unwrap()
+            .split
+            .iter()
+            .map(|p| p.status)
+            .collect();
+        assert_eq!(statuses, vec![SplitStatus::Paid, SplitStatus::Failed]);
+        assert_eq!(
+            events()
+                .iter()
+                .filter(|e| e.contains("\"event\":\"split_settled\""))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn token_income_is_split_and_failed_shares_come_back() {
+        let mut vault = vault_with_usd_worker(); // 100 USD in, no split yet
+        set_caller(owner(), T0);
+        vault.set_split(Some(split_rule()));
+        set_caller(token(), T0);
+        let _ = vault.ft_on_transfer(
+            acc("customer.test"),
+            U128(usd(10).as_yoctonear()),
+            "order 7".into(),
+        );
+        let id = vault.get_vault().next_receipt_id - 1;
+        // 1 + 0.5 USD forwarded: out of the agents' reach right away.
+        assert_eq!(
+            token_balance(&vault),
+            NearToken::from_yoctonear(108_500_000)
+        );
+        assert_eq!(vault.get_receipt(id).unwrap().split.len(), 2);
+        set_callback_results(
+            context(vault_id(), T0 + 1),
+            vec![near_sdk::PromiseResult::Failed, ok(b"")],
+        );
+        vault.on_split_settled(id);
+        assert_eq!(
+            token_balance(&vault),
+            NearToken::from_yoctonear(109_500_000),
+            "carol's failed share is credited back"
+        );
+    }
+
+    #[test]
+    fn split_rules_are_validated_and_owner_only() {
+        let mut vault = vault_with_worker();
+        set_caller(owner(), T0);
+        let mut bad = split_rule();
+        bad.beneficiaries[0].bps = 9_600;
+        let err =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vault.set_split(Some(bad))));
+        assert!(err.is_err(), "more than 100% is refused");
+        vault.set_split(None);
+        assert_eq!(vault.get_vault().split, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "only the owner can call this method")]
+    fn strangers_cannot_set_a_split() {
+        let mut vault = vault_with_worker();
+        set_caller(acc("mallory.test"), T0);
+        vault.set_split(Some(split_rule()));
+    }
+
+    #[test]
+    fn payees_marked_deposit_are_paid_through_their_deposit_method() {
+        let mut vault = vault_with_worker();
+        set_caller(owner(), T0);
+        let mut p = policy();
+        p.allow = Allow::List(vec![AllowEntry {
+            account_id: api(),
+            methods: Some(vec!["deposit".into()]),
+        }]);
+        vault.set_policy(worker(), p);
+        set_caller(acc("worker.test"), T0);
+        let _ = vault.pay(api(), millinear(20), None, None, None);
+        let scheduled = scheduled();
+        assert!(
+            scheduled.contains("api.test:deposit(20000000000000000000000)"),
+            "{scheduled}"
+        );
+        assert!(scheduled.contains("on_paid"));
+
+        let mut wrong = policy();
+        wrong.allow = Allow::List(vec![AllowEntry {
+            account_id: api(),
+            methods: Some(vec!["withdraw".into()]),
+        }]);
+        assert!(wrong.validate().unwrap_err().contains("deposit"));
     }
 
     #[test]

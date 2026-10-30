@@ -32,7 +32,21 @@ export interface Budget {
 
 export interface AllowEntry {
   account_id: string;
+  /** `["deposit"]`: the payee is another Allowance vault, paid through its `deposit` (its revenue split applies). */
   methods?: string[] | null;
+}
+
+/** Revenue split: shares of every income, in basis points (100 = 1%). */
+export interface Split {
+  beneficiaries: Array<{ account_id: string; bps: number }>;
+}
+
+export interface SplitPayout {
+  account_id: string;
+  bps: number;
+  /** Base units of the income receipt's asset. */
+  amount: Yocto;
+  status: 'pending' | 'paid' | 'failed';
 }
 
 export type Allow = 'any' | { list: AllowEntry[] };
@@ -114,6 +128,8 @@ export interface Receipt {
   approved_by: string | null;
   /** NEP-141 payments: NEAR the vault attached to register the payee on the token. */
   storage_deposit: Yocto | null;
+  /** Income receipts: revenue-split shares forwarded to beneficiaries. */
+  split: SplitPayout[];
 }
 
 export interface Pending {
@@ -166,6 +182,8 @@ export interface VaultInfo {
   key_gas_allowance: Yocto;
   /** NEP-141 tokens the vault accepts, with the balance it accounts for. */
   tokens: TokenView[];
+  /** Revenue split applied to every income, if any. */
+  split: Split | null;
   block_timestamp_ns: Ns;
   version: string;
 }

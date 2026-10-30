@@ -334,6 +334,7 @@ async function ledger(values: Values, io: CliIo): Promise<number> {
       `vault ${vaultId}  owner ${info.owner_id}${info.approver_id ? `  approver ${info.approver_id}` : ''}  ${info.paused ? 'PAUSED' : 'running'}`,
       `balance ${near(info.balance)}  available ${near(info.available)}  receipts ${info.next_receipt_id}  pending ${info.pending}`,
       ...info.tokens.map((t) => `token ${t.token_id}: ${formatAmount(t.balance, { ft: t.token_id })} accounted by the vault`),
+      ...(info.split ? [`revenue split: ${info.split.beneficiaries.map((b) => `${b.account_id} ${b.bps / 100}%`).join(', ')} of every income`] : []),
       '',
       `agents (${agents.length})`,
     ];
