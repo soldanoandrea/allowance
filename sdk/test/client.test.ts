@@ -188,6 +188,8 @@ describe('error mapping', () => {
 
   it('maps protocol refusals of the function-call key to stable codes', () => {
     expect(toAllowanceError(named('AccessKeyNotFoundActionError', 'Access key ed25519:x does not exist on account vault.test')).code).toBe('access_key_not_found');
+    // A fresh process looks the nonce up first: the deleted key fails there.
+    expect(toAllowanceError(named('Error', 'Access key ed25519:FTc1FZ does not exist at block height 162')).code).toBe('access_key_not_found');
     expect(toAllowanceError(named('AccessKeyMethodNameMismatchActionError', 'Access key does not allow method withdraw')).code).toBe('method_not_allowed');
     expect(toAllowanceError(named('X', 'DepositWithFunctionCall')).code).toBe('deposit_not_allowed');
     expect(toAllowanceError(named('X', 'NotEnoughAllowance')).code).toBe('not_enough_allowance');

@@ -31,7 +31,8 @@ export class AllowanceError extends Error {
 }
 
 const PATTERNS: ReadonlyArray<[RegExp, AllowanceErrorCode, string]> = [
-  [/AccessKeyNotFound|does not exist on account/i, 'access_key_not_found', 'the agent key is not on the vault account (removed, or the vault was killed)'],
+  // From send_tx (AccessKeyNotFound) or, in a fresh process, from the nonce lookup before signing.
+  [/AccessKeyNotFound|does not exist on account|Access key \S+ does not exist/i, 'access_key_not_found', 'the agent key is not on the vault account (removed, or the vault was killed)'],
   [/MethodNameMismatch|does not allow method/i, 'method_not_allowed', 'the protocol refused this method for a function-call key'],
   [/DepositWithFunctionCall/i, 'deposit_not_allowed', 'function-call keys cannot attach deposits'],
   [/NotEnoughAllowance/i, 'not_enough_allowance', "the key's gas allowance is exhausted; the owner must call top_up_allowance"],
