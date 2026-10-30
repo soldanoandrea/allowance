@@ -20,7 +20,12 @@
  * Flags: --keep (leave the chain and API running until Ctrl+C),
  *        --update-docs (write the attack transcript to docs/attack-log.md),
  *        --planner scripted|llm,
- *        --no-ft (skip the NEP-141 scenario).
+ *        --no-ft (skip the NEP-141 scenario),
+ *        --manual-approve (you approve the waiting payment with the CLI
+ *        instead of the script; for recording the video).
+ *
+ * With --keep or --manual-approve the owner's key (the sandbox genesis key, a
+ * public constant) is also written to .tmp/owner-key.json for the CLI.
  *
  * Every account and key exists only inside the sandbox. The agent key is
  * written to examples/local_demo/.tmp/agent-key.json (git-ignored, mode 600)
@@ -68,6 +73,7 @@ const { values } = parseArgs({
     'update-docs': { type: 'boolean', default: false },
     planner: { type: 'string', default: 'scripted' },
     'no-ft': { type: 'boolean', default: false },
+    'manual-approve': { type: 'boolean', default: false },
   },
 });
 const withFt = !values['no-ft'];
@@ -187,6 +193,12 @@ try {
   };
   const keyFile = writeKey('agent-key.json', demo.agentPublicKey, demo.agentSecretKey);
   say(`agent key (sandbox only) -> ${keyFile}`);
+  const ownerKeyFile = join(TMP, 'owner-key.json');
+  if (values.keep || values['manual-approve']) {
+    writeFileSync(ownerKeyFile, JSON.stringify({ account_id: demo.ownerId, private_key: demo.ownerSecretKey }, null, 2), { mode: 0o600 });
+    chmodSync(ownerKeyFile, 0o600);
+    say(`owner key (sandbox genesis key, sandbox only) -> ${ownerKeyFile}`);
+  }
 
   let token: DemoToken | undefined;
   let usdKeyFile = '';
@@ -241,8 +253,13 @@ try {
   const owner = new OwnerClient({ vaultId: demo.vaultId, ownerId: demo.ownerId, rpcUrl: node.rpcUrl, ownerKey: demo.ownerSecretKey });
 
   step('4. agent task loop (pays the API through the vault)');
-  const stopApprover = startOwnerApprover(owner, reader);
-  const loop = await runNode('sdk/examples/agent-loop.ts', [...common, '--planner', values.planner ?? 'scripted', '--approval-timeout', '60']);
+  const manual = values['manual-approve'];
+  if (manual) {
+    say('YOU are the owner: when the agent waits for approval, run in another terminal');
+    say(`  npx allowance approve <request id> --vault ${demo.vaultId} --rpc ${node.rpcUrl} --owner ${demo.ownerId} --owner-key-file ${relative(REPO_ROOT, ownerKeyFile)}`);
+  }
+  const stopApprover = manual ? async () => 1 : startOwnerApprover(owner, reader);
+  const loop = await runNode('sdk/examples/agent-loop.ts', [...common, '--planner', values.planner ?? 'scripted', '--approval-timeout', manual ? '600' : '60']);
   const approvals = await stopApprover();
 
   let ftLoop = { code: 0, output: '' };
@@ -357,7 +374,9 @@ try {
     console.log(`\nSandbox and API keep running. Try the CLI (agent key is sandbox-only):`);
     console.log(`  set -a; . ${join(TMP, 'demo.env')}; set +a`);
     console.log(`  npx allowance ledger`);
-    console.log(`  npx allowance simulate --payee ${demo.payeeId} --amount 0.1 --key-file ${keyFile}`);
+    console.log(`  npx allowance simulate --payee ${demo.payeeId} --amount 0.1 --key-file ${relative(REPO_ROOT, keyFile)}`);
+    console.log(`  npx allowance kill --owner ${demo.ownerId} --owner-key-file ${relative(REPO_ROOT, ownerKeyFile)}`);
+    console.log(`  npx allowance pay --payee ${demo.payeeId} --amount 0.01 --force --key-file ${relative(REPO_ROOT, keyFile)}    # after kill: access_key_not_found`);
     console.log('Press Ctrl+C to stop.');
     await new Promise<never>(() => {});
   }

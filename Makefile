@@ -1,6 +1,6 @@
 .PHONY: build test test-unit test-sandbox fmt clippy clean size \
         sandbox-node node-check demo demo-keep attack-log test-ts typecheck check \
-        demo-testnet
+        demo-testnet demo-manual
 
 # ----------------------------------------------------------------------
 # Contract (Rust)
@@ -75,6 +75,11 @@ demo-keep: node-check build sandbox-node node_modules
 # accounts, never writes keys. STEP=deploy|fund|add-agent|run (default all).
 demo-testnet: node-check build node_modules
 	node --env-file-if-exists=.env.testnet scripts/testnet/demo.ts $(or $(STEP),all)
+
+# For recording the video: like demo-keep, but YOU approve the payment that
+# waits for a human, with the CLI command the demo prints.
+demo-manual: node-check build sandbox-node node_modules
+	node examples/local_demo/run.ts --keep --manual-approve
 
 # Re-run the demo and refresh docs/attack-log.md with the real output.
 attack-log: node-check build sandbox-node node_modules

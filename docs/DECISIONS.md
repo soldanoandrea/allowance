@@ -360,3 +360,31 @@ design says.
     `shop.sandbox` with a 10% / 5% split; the worker's policy allowlists it
     as a vault payee (policy v2) and pays it 0.1 NEAR; the provider receives
     exactly 0.01 NEAR in the same transaction (11 checks in total).
+
+### Testnet preparation and documentation
+
+70. **Feature 10 is prepared, not executed.** `scripts/testnet/demo.ts`
+    (`make demo-testnet`) works only on accounts the human created, refuses
+    mainnet endpoints and non-`.testnet` accounts, and is a dry run unless
+    `TESTNET_CONFIRM=yes` / `--yes`. Its tests cover the configuration and
+    prove the dry run does not touch the network (an unroutable RPC URL).
+71. **Keys from the environment first**: every key can be given as a value
+    (`TESTNET_OWNER_KEY`, ...) injected at run time by a password manager
+    (e.g. `op run`), or as a key file. The scripts never write keys;
+    `scripts/testnet/agent-key.ts` prints a fresh agent key on stdout.
+72. **Testnet defaults mirror the local demo's policy** (cap 1, 2 per day,
+    approval above 0.5) so the three datasets show the same three paths;
+    about 8 testnet NEAR in all.
+73. The testnet run does not include the factory: publishing the vault as a
+    global contract burns ~36.5 NEAR; docs/TESTNET.md gives the commands as
+    the mainnet plan.
+74. **`make demo-manual`** (`--keep --manual-approve`) lets the human
+    approve the waiting payment with the printed CLI command, for the video;
+    with `--keep`/`--manual-approve` the sandbox owner key (the genesis key,
+    a public constant) is written to the ignored `.tmp/` for the CLI.
+75. **Submission timing (open question for the human)**: the repository's
+    commits are dated 2026-10-30/31, before the hackathon window
+    (2026-11-01 to 2026-11-14). HACKATHON.md asks that work building on an
+    earlier project be separable (tags `pre-hackathon` /
+    `hackathon-submission`, a README section linking the diff). The
+    decision is the owner's; docs/SUBMISSION.md lists it in the checklist.
