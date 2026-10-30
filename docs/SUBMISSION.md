@@ -51,14 +51,12 @@ Vault" open.
 ## Before sending: checklist for the human
 
 - [ ] Submission window: 2026-11-01T00:00:00Z to 2026-11-14T23:59:00Z (00:59 CET on Nov 15).
-- [ ] **Timeline disclosure.** The commits in this repository are dated
-      2026-10-30 and 2026-10-31, before the window opens. The rules say work
-      that builds on an earlier project must be separable, e.g. with tags
-      `pre-hackathon` and `hackathon-submission` and a README section linking
-      the diff, and that only the work done in the window is judged. Decide
-      how to present this (tag the current state as `pre-hackathon` and keep
-      building in the window, or disclose it in the README) before the repo
-      goes public.
+- [ ] **Timeline disclosure.** HACKATHON.md Q-001: code written from the
+      2026-10-19 announcement onward counts; only commits before that date are
+      baseline. Every commit in this repository is dated 2026-10-30 or later,
+      so all of it is eligible. State this in the README (a short "Timeline"
+      section: first commit date, built entirely after the announcement, no
+      pre-existing code) rather than tagging a `pre-hackathon` state.
 - [ ] If you submit another project too, each README must name the other (max two).
 - [ ] Repository public, README "do X, see Y" steps work on a clean machine (`make demo`), LICENSE present (MIT).
 - [ ] X post published by you: says the project was built at NEAR HACKATHON, tags @NEARProtocol and #NEARHackathon, has the video.
