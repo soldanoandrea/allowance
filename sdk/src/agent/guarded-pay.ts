@@ -1,5 +1,5 @@
 import type { AllowanceClient, PayResult } from '../client.ts';
-import { describeRejection, describeStatus } from '../describe.ts';
+import { describeRejection } from '../describe.ts';
 import type { Simulation } from '../types.ts';
 import { near } from '../units.ts';
 
@@ -60,4 +60,3 @@ export function logPayResult(log: Log, result: PayResult): void {
   for (const e of result.events) log(`  event ${e.event} ${JSON.stringify(e.data)}`);
 }
 
-export { describeStatus };
