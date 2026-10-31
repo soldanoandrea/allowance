@@ -1,0 +1,49 @@
+# Publishes the static ledger page (ledger/: one HTML file, two classic
+# scripts, no build) to GitHub Pages on every push to main.
+#
+# One-time setup in the repository: Settings -> Pages -> Build and
+# deployment -> Source: "GitHub Actions". Then open
+#   https://<owner>.github.io/<repo>/?rpc=https://test.rpc.fastnear.com&vault=<vault>.testnet
+# (without parameters the page shows a form for the RPC URL and the vault).
+name: Ledger page (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; never cancel one that is running.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ledger/ to GitHub Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Check the page is self-contained
+        run: |
+          test -f ledger/index.html && test -f ledger/core.js && test -f ledger/app.js
+          if grep -nE '(src|href)="(https?:)?//' ledger/index.html; then
+            echo "ledger/index.html must not load third-party resources"; exit 1
+          fi
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload ledger/ as the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ledger
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

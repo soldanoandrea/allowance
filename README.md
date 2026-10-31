@@ -282,6 +282,22 @@ split, each agent with its policy and budget meter, pending approvals (with
 the CLI command to approve), receipts (with their split shares) and recent
 NEP-297 events. Optional `interval=`, `scan=`, `from=`.
 
+**Hosted on GitHub Pages.** `.github/workflows/pages.yml` publishes `ledger/`
+on every push to `main` (enable it once: Settings -> Pages -> Source: GitHub
+Actions). The page takes the chain and the vault from the query string, so a
+testnet vault is one link:
+
+```
+https://<owner>.github.io/<repo>/?rpc=https://test.rpc.fastnear.com&vault=vault.you.testnet
+https://<owner>.github.io/<repo>/?rpc=https%3A%2F%2Frpc.testnet.near.org&vault=vault.you.testnet&scan=600
+```
+
+`rpc` must be an endpoint that allows CORS (the public testnet RPCs above
+do); without parameters the page shows a form. For the local sandbox use the
+`file://` URL that `make demo-keep` and `npx allowance ledger` print: a page
+served over https may be blocked by the browser from reading
+`http://127.0.0.1`.
+
 Limitation: without an indexer, events are found by scanning blocks over
 plain RPC (one `block` call per height, plus `chunk` and `tx` calls when a
 chunk has transactions) for transactions **sent to the vault**, starting
@@ -519,7 +535,7 @@ global code hash.
 | 5 | TS agent SDK + CLI, agent loop with optional LLM and one counteroffer | done |
 | 6 | Paid demo API (402 + receipt verification via RPC) | done (NEAR and NEP-141 prices) |
 | 7 | Attack demo, log in [docs/attack-log.md](docs/attack-log.md) | done (now three layers: risk check, simulate, contract) |
-| 8 | Ledger and policy page (static, RPC views + events) | done (hosting on GitHub Pages pending) |
+| 8 | Ledger and policy page (static, RPC views + events) | done; GitHub Pages workflow ready (`.github/workflows/pages.yml`), runs once the repository is public |
 | 9 | `make demo`, README, `.env.example`, CI, LICENSE | done (11 checks) |
 | 10 | Testnet deployment, accounts, hosted ledger | **prepared, not run**: `make demo-testnet`, `scripts/testnet/`, [docs/TESTNET.md](docs/TESTNET.md); needs the owner's accounts and explicit go |
 | stretch | Account-based agents | done (one sandbox test) |
