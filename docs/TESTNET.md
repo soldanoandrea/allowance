@@ -27,7 +27,7 @@ Build once: `make build` (writes `target/near/allowance.wasm`).
 Budget: the faucet sponsors the owner account with free testnet NEAR (top it
 up with the faucet described at https://docs.near.org/getting-started/faucet
 if needed). The vault needs about **4.5 NEAR** on its account before the
-deploy (the 365 KB contract locks ~3.7 NEAR of storage stake), plus the
+deploy (the 385 KB contract locks ~3.9 NEAR of storage stake), plus the
 deposit (2 NEAR by default, which covers the demo's 0.02 + 0.5 + 0.8 NEAR of
 purchases), plus 1 NEAR for the API account: about 8 NEAR in all.
 
@@ -157,8 +157,8 @@ full-access key so that only `owner_id` can manage it through the contract
 
 The factory (`factory/`) is tested on the sandbox. On testnet or mainnet it
 needs the vault code published once as a global contract by hash, which
-**burns** 10x the storage of the wasm (36.5 NEAR for the current 365 KB
-build), more than a faucet account holds:
+**burns** 10x the storage of the wasm (38.55 NEAR for the current
+385 KB build, measured on the sandbox), more than a faucet account holds:
 
 ```sh
 near contract deploy-as-global use-file target/near/allowance.wasm as-global-hash you.testnet network-config testnet sign-with-... send
@@ -167,6 +167,14 @@ near contract deploy factory.you.testnet use-file target/near/allowance_factory/
   prepaid-gas '30 Tgas' attached-deposit '0 NEAR' network-config testnet sign-with-... send
 near contract call-function as-transaction factory.you.testnet create_vault json-args '{"name":"alice"}' \
   prepaid-gas '100 Tgas' attached-deposit '1 NEAR' sign-as you.testnet network-config testnet sign-with-... send
+```
+
+or, for the last step, the TypeScript client (`FactoryClient` in the SDK):
+
+```sh
+npx allowance factory create --factory factory.you.testnet --rpc https://test.rpc.fastnear.com \
+  --name alice --owner you.testnet --deposit 1 --owner-key-file you.json
+npx allowance factory list --factory factory.you.testnet --rpc https://test.rpc.fastnear.com
 ```
 
 Each vault then costs ~0.003 NEAR of storage stake plus its deposit. This is

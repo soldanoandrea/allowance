@@ -45,7 +45,7 @@ works), `make`. macOS on Apple Silicon or Linux x86_64/aarch64 (the platforms
 rustup target add wasm32-unknown-unknown
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
 
-make demo         # build, start a local sandbox, run the whole story, exit (first run: a few minutes of Rust compile + sandbox download; then ~20 s)
+make demo         # build, start a local sandbox, run the whole story, exit (first run: a few minutes of Rust compile + sandbox download; then about 30 s)
 make demo-keep    # same, then keep the chain and the API running and print the ledger URL and CLI commands
 make demo-manual  # like demo-keep, but YOU approve the payment that waits for a human (for recording the video)
 make check        # everything CI runs: cargo test --workspace, TypeScript type-check + tests, make demo
@@ -128,7 +128,7 @@ confirm).
 | Criterion | Where it is demonstrated | Check it with |
 |---|---|---|
 | Runs and does what this README says | one command builds, starts a throw-away chain and plays the whole story with eleven on-chain checks (non-zero exit if one fails); a fresh clone following only this README is recorded in [docs/FRESH_CLONE_CHECK.md](docs/FRESH_CLONE_CHECK.md) | `make demo` |
-| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 75 Rust tests (65 unit, 10 on neard-sandbox) and 131 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
+| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 75 Rust tests (65 unit, 10 on neard-sandbox) and 132 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
 | Design | two independent layers: the protocol scopes the agent key (methods, gas, no deposits), the contract checks the money; free `simulate` before every payment; receipts a payee verifies with one view, no facilitator ([docs/PAYMENT_FLOW.md](docs/PAYMENT_FLOW.md)); every trade-off written down in [docs/DECISIONS.md](docs/DECISIONS.md); a static ledger page with no build | `npx allowance ledger`, [ledger/](ledger/) |
 | Impact | an agent that pays for APIs, data or other agents with bounded loss: the prompt-injection attack in [docs/attack-log.md](docs/attack-log.md) moves no money; stablecoin prices; income, revenue split and vault-to-vault payments for agent businesses; ~0.003 NEAR of storage per vault through the factory | `make demo` (steps 4-6), [demo video](docs/media/demo.mp4) |
 | Originality | the agent is a function-call key **on the vault account itself**: no agent account, no faucet, no custodian, and the kill switch is `DeleteKey` at protocol level; x402-style receipts bound to the request hash; counterparty risk from public chain data (account age, code changes, history in this vault) | [How a payment flows](#how-a-payment-flows), `risk/` |
@@ -470,8 +470,8 @@ the payee's split runs in the same transaction.
 ## Vault factory (`factory/`)
 
 The vault wasm is published once as a NEAR **global contract by code hash**
-(immutable; the publisher burns 10x the storage: 36.47 NEAR for the 365 KB
-build on the sandbox). `create_vault(name, owner_id?, approver_id?, ...)`
+(immutable; the publisher burns 10x the storage: 38.55 NEAR for the
+385 KB build on the sandbox). `create_vault(name, owner_id?, approver_id?, ...)`
 creates `<name>.<factory>` with one batch (`CreateAccount`, `Transfer`,
 `UseGlobalContract`, `new`); the new vault stores ~312 bytes (~0.003 NEAR of
 stake) instead of its own 3.6 NEAR copy of the code, has **no access key**
@@ -604,11 +604,11 @@ Prompts from [near-hackathon-prompt-examples](https://github.com/nearai/near-hac
 |---|---|
 | `cargo test` | vault: 60 unit tests (policy core, NEP-141 flows, split, contract on a mocked VM with mocked promise results) + 9 sandbox tests (`tests/sandbox.rs`: function-call key flows, NEP-141 with a real token, revenue split and vault-to-vault payments) + 1 factory sandbox test (`tests/factory.rs`) |
 | `cargo test --workspace` | the above + 5 factory unit tests (what `make test` and CI run) |
-| `npm test` | 131 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
+| `npm test` | 132 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
 | `npm run typecheck` | `tsc` strict over SDK, CLI, examples, demo API, risk service, testnet scripts, demo orchestrator and tests |
 | `make demo` | the whole story on a sandbox with eleven on-chain checks; non-zero exit if one fails |
 
-Contract-only targets: `make build` (vault 364,576 bytes with the ABI
+Contract-only targets: `make build` (vault 385,388 bytes with the ABI
 embedded; factory 171,067; test token 154,819), `make size`, `make test-unit`
 (seconds), `make test-sandbox`, `make clippy`, `make fmt`.
 

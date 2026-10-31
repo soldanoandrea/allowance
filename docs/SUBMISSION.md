@@ -63,6 +63,8 @@ Vault" open.
       with its public URL, and make sure near-thesis's README names Allowance
       back.
 - [ ] Repository public, README "do X, see Y" steps work on a clean machine (`make demo`), LICENSE present (MIT).
+      A fresh clone following only the README passed on 2026-10-31
+      ([FRESH_CLONE_CHECK.md](FRESH_CLONE_CHECK.md); toolchain preinstalled).
 - [ ] X post published by you: says the project was built at NEAR HACKATHON, tags @NEARProtocol and #NEARHackathon, has the video.
 - [ ] Any hosted demo (ledger page on GitHub Pages, testnet vault) stays up until at least 2026-11-18, ideally 2026-11-25.
 - [ ] No secrets in git history (`git log -p | grep -i "ed25519:"` should only show public keys and the documented sandbox constants).
