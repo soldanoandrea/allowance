@@ -144,7 +144,7 @@ export function createApiServer(options: ApiOptions): ApiServer {
           ? `Deal: ${fmt(offer)} paid now beats ${fmt(product.price)} paid later.`
           : `${fmt(offer)} is below what we can accept for this dataset; the list price stands.`,
       };
-      log(`GET ${product.path}  counteroffer ${fmt(offer)} ("${reason.slice(0, 80)}") -> ${counteroffer.status}`);
+      log(`GET ${product.path}  counteroffer ${fmt(offer)} ("${shorten(reason, 80)}") -> ${counteroffer.status}`);
       return send(res, 402, body402(issueQuote(product, accepted ? offer : product.price, counteroffer)));
     }
 
@@ -204,4 +204,12 @@ function header(req: IncomingMessage, name: string): string | undefined {
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
   res.end(JSON.stringify(body));
+}
+
+/** Shorten free text for a log line at a word boundary, marking the cut with "...". */
+function shorten(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 3);
+  const space = cut.lastIndexOf(' ');
+  return `${space > max / 2 ? cut.slice(0, space) : cut}...`;
 }

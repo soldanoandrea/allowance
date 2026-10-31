@@ -98,6 +98,17 @@ describe('allowance CLI', () => {
     expect(rpc.sent[0]).toMatchObject({ signerId: 'owner.test', methodName: 'approve', args: { pending_id: 0 } });
   });
 
+  it('explains an approval request that is no longer open', async () => {
+    rpc.onTx = () => ({
+      failure: { ActionError: { index: 0, kind: { FunctionCallError: { ExecutionError: 'Smart contract panicked: unknown pending id' } } } },
+    });
+    const ownerEnv = { ALLOWANCE_OWNER_KEY: agentKey.toString(), ALLOWANCE_OWNER: 'owner.test' };
+    expect(await run(['approve', '7'], ownerEnv)).toBe(EXIT.error);
+    expect(err.at(-1)).toMatch(/no open approval request #7 \(already approved, denied or expired/);
+    expect(await run(['deny', '7'], ownerEnv)).toBe(EXIT.error);
+    expect(err.at(-1)).toMatch(/no open approval request #7/);
+  });
+
   it('builds a file:// ledger URL', () => {
     expect(ledgerUrl('http://127.0.0.1:3030', 'vault.test')).toMatch(/^file:\/\/.*\/ledger\/index\.html\?rpc=http%3A%2F%2F127\.0\.0\.1%3A3030&vault=vault\.test$/);
   });

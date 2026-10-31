@@ -362,7 +362,7 @@ async function ledger(values: Values, io: CliIo): Promise<number> {
     ];
     for (const a of agents) {
       const remaining = a.remaining_budget === null ? '' : `, ${formatAmount(a.remaining_budget, a.policy.asset)} left in window`;
-      out.push(`  ${describeAgent(a.id)} "${a.label}" ${a.active ? 'active' : 'DISABLED'}, policy v${a.policy_version}, ${a.state.payments} payments${remaining}`);
+      out.push(`  ${describeAgent(a.id)} "${a.label}" ${a.active ? 'active' : 'DISABLED'}, policy v${a.policy_version}, ${a.state.payments} payment${a.state.payments === 1 ? '' : 's'}${remaining}`);
       for (const line of describePolicy(a.policy)) out.push(`    - ${line}`);
     }
     out.push('', `pending approvals (${pending.length})`);
@@ -394,12 +394,24 @@ async function verify(values: Values, io: CliIo): Promise<number> {
 async function decide(command: 'approve' | 'deny', idText: string | undefined, values: Values, io: CliIo): Promise<number> {
   const owner = ownerClient(values, io);
   const pendingId = intOf(idText, `${command} <pending id>`);
+  // The contract forgets a request once it is approved, denied or expired:
+  // say so instead of surfacing its bare "unknown pending id" panic.
+  const closed = (err: unknown): never => {
+    if (err instanceof AllowanceError && /unknown pending id/.test(err.message)) {
+      throw new AllowanceError(
+        'contract_panic',
+        `no open approval request #${pendingId} (already approved, denied or expired, or never created); list the open ones with \`allowance ledger\``,
+        { cause: err },
+      );
+    }
+    throw err;
+  };
   if (command === 'deny') {
-    const tx = await owner.deny(pendingId);
+    const tx = await owner.deny(pendingId).catch(closed);
     print(io, values, tx, () => `denied approval request #${pendingId} (tx ${tx.txHash})`);
     return EXIT.ok;
   }
-  const tx = await owner.approve(pendingId);
+  const tx = await owner.approve(pendingId).catch(closed);
   const o = tx.value;
   print(io, values, tx, () =>
     `approve #${pendingId}: ${o.outcome} (receipt #${o.receipt_id})${o.outcome === 'rejected' ? ` - ${describeRejection(o.reason)}` : ''} (tx ${tx.txHash})`,
