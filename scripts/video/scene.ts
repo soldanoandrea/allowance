@@ -4,9 +4,10 @@
  * `make demo-manual` runs live in the background of the recording and writes
  * its output to a log. This prints one scene of that real output at reading
  * pace: it waits until the lines between --from and --to exist in the log,
- * clears the screen, prints a caption, then the lines (optionally filtered),
- * cut to the terminal width so nothing wraps. It never changes the text of a
- * line, apart from that cut and from shortening the repository path. The
+ * clears the screen, prints a caption, then the lines (optionally filtered).
+ * A line wider than the terminal wraps at a word boundary onto indented
+ * continuation lines, so nothing is cut at the right edge. It never changes
+ * the text of a line, apart from shortening the repository path. The
  * caption is printed in capitals, so the tape can wait for it on screen
  * without matching the (hidden) command line that started the scene.
  *
@@ -16,6 +17,8 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
+
+import { wrapText } from '../../sdk/src/format.ts';
 
 const { values } = parseArgs({
   options: {
@@ -76,10 +79,17 @@ while (scene === null) {
   await sleep(250);
 }
 
+const INDENT = '    ';
 const shown = scene
   .filter((l) => (keep ? keep.test(l) : true) && !(drop && drop.test(l)))
-  .map((l) => l.split(repo).join('.'))
-  .map((l) => (l.length >= columns ? `${l.slice(0, columns - 2)}~` : l));
+  .map((l) => l.split(repo).join('.'));
+
+/** `line` as terminal rows: the first as is, the rest indented, none wider than `columns - 1`. */
+function rows(line: string): string[] {
+  if (line.length < columns) return [line];
+  const [first = '', ...rest] = wrapText(line, columns - 1);
+  return [first, ...wrapText(rest.join(' '), columns - 1 - INDENT.length).map((r) => INDENT + r)];
+}
 
 process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
 if (values.title) process.stdout.write(`\x1b[1;30;46m ${values.title.toUpperCase()} \x1b[0m\n`);
@@ -98,6 +108,6 @@ function colorOf(line: string): string {
 
 for (const line of shown) {
   const color = colorOf(line);
-  process.stdout.write(`${color}${line}${color ? '\x1b[0m' : ''}\n`);
+  for (const row of rows(line)) process.stdout.write(`${color}${row}${color ? '\x1b[0m' : ''}\n`);
   await sleep(delayMs);
 }

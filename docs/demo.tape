@@ -5,8 +5,8 @@
 #
 # What is real: `make demo-manual` runs in the background and writes its
 # output to examples/local_demo/.tmp/demo.log; the scenes print slices of that
-# live log at reading pace (scripts/video/scene.ts, which only cuts long lines
-# to the terminal width); the owner's approval, the ledger, the kill switch
+# live log at reading pace (scripts/video/scene.ts, which wraps long lines
+# under themselves instead of cutting them); the owner's approval, the ledger, the kill switch
 # and the refused payment are real CLI commands typed against the same chain.
 # The captions stand in for the voice-over.
 
@@ -17,10 +17,12 @@ Require make
 
 Set Shell "bash"
 Set FontFamily "Menlo"
-Set FontSize 16
+# 1920x1080 (16:9, full HD for X) with a 20 px font: about 155 columns and
+# 43 rows. Long lines wrap (scene.ts, the CLI's tables), none is cut.
+Set FontSize 20
 Set LineHeight 1.2
-Set Width 1276
-Set Height 860
+Set Width 1920
+Set Height 1080
 Set Padding 24
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 28ms
@@ -69,7 +71,7 @@ Sleep 2s
 
 # ---------------------------------------------------------------- 1. owner sets the rules
 Hide
-Type `scene --title "1/7  The owner sets the rules" --note "Deploy and fund the vault, write the policy on-chain, register each agent as a function-call key on the vault" --from '^=== 2\.' --to 'token agent key' --delay 120`
+Type `scene --title "1/7  The owner sets the rules" --note "Deploy and fund the vault, write the policy on-chain, register each agent as a function-call key on the vault" --from '^=== 2\.' --to 'token agent key' --drop '^===' --delay 120`
 Enter
 Wait+Screen /THE OWNER SETS/
 Show
@@ -125,7 +127,7 @@ Sleep 4s
 
 # ---------------------------------------------------------------- 5. stablecoins
 Hide
-Type `scene --title "5/7  Stablecoins (NEP-141)" --note "A second agent pays 2 SUSD: the vault registers the API on the token (storage_deposit), then ft_transfer" --from '^=== 4b\.' --to 'now holds 2 SUSD' --keep '^===|HTTP 402|simulate|pay tx|ft_payee_registration|payment_paid|verified|holds' --delay 250`
+Type `scene --title "5/7  Stablecoins (NEP-141)" --note "A second agent pays 2 SUSD: the vault registers the API on the token (storage_deposit), then ft_transfer" --from '^=== 4b\.' --to 'now holds 2 SUSD' --keep 'HTTP 402|simulate|pay tx|ft_payee_registration|payment_paid|verified|holds' --delay 250`
 Enter
 Wait+Screen /STABLECOINS/
 Show
@@ -134,7 +136,7 @@ Sleep 6s
 
 # ---------------------------------------------------------------- 6. the attack
 Hide
-Type `scene --title "6/7  The attack" --note "A web page hides an instruction to pay an attacker. Even a compromised process that signs anyway moves no money" --from '^=== 5\.' --to 'vault available:' --drop 'event |agent key ed25519|counterparty-risk check on|\[agent\] GET' --delay 110`
+Type `scene --title "6/7  The attack" --note "A web page hides an instruction to pay an attacker. Even a compromised process that signs anyway moves no money" --from '^=== 5\.' --to 'vault available:' --drop '^===|event |agent key ed25519|counterparty-risk check on|\[agent\] GET' --delay 110`
 Enter
 Wait+Screen /THE ATTACK/
 Show
@@ -143,7 +145,7 @@ Sleep 9s
 
 # ---------------------------------------------------------------- 7. a business, not just a wallet
 Hide
-Type `scene --title "7/7  A business, not just a wallet" --note "The API keeps its revenue in its own vault; a revenue split forwards 10% to its data provider in the same transaction" --from '^=== 6\.' --to 'demo OK' --keep '^=== 6|^\[demo\]|\[agent\] (simulate|pay tx)|^checks|^  (ok|FAIL)|demo (OK|FAILED)' --delay 140`
+Type `scene --title "7/7  A business, not just a wallet" --note "The API keeps its revenue in its own vault; a revenue split forwards 10% to its data provider in the same transaction" --from '^=== 6\.' --to 'demo OK' --keep '^\[demo\]|\[agent\] (simulate|pay tx)|^checks|^  (ok|FAIL)|demo (OK|FAILED)' --delay 140`
 Enter
 Wait+Screen /NOT JUST A WALLET/
 Show

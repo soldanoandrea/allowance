@@ -76,7 +76,7 @@ describe('allowance CLI', () => {
     expect(out.join('\n')).toMatch(/#0\s+pay\s+rejected \(not_allowlisted\)\s+ed25519:9uk3f8\.\.\.UaamR\s+evil\.test\s+2 NEAR/);
   });
 
-  it('fits the receipts table to the terminal width by cutting the memo', async () => {
+  it('fits the receipts table to the terminal width by wrapping the memo', async () => {
     rpc.view('get_vault', () => ({ first_receipt_id: 12, next_receipt_id: 13 }));
     rpc.view('get_receipts', () => [
       { id: 12, kind: 'pay', status: { status: 'paid' }, agent: { key: 'ed25519:9uk3f895LsBuhPCgWF5pNHfMvfMtE3BVcLioD31UaamR' }, payee: 'api.test', amount: '20000000000000000000000', memo: 'daily candles for the NEAR/USDC report | /dataset', delivered: true },
@@ -84,7 +84,12 @@ describe('allowance CLI', () => {
     expect(await main(['receipts'], { out: (l) => out.push(l), err: (l) => err.push(l), env: { ALLOWANCE_VAULT: 'vault.test', ALLOWANCE_RPC_URL: rpc.url }, columns: 100 })).toBe(EXIT.ok);
     const lines = out.join('\n').split('\n');
     expect(Math.max(...lines.map((l) => l.length))).toBeLessThanOrEqual(100);
-    expect(lines[2]).toMatch(/#12\s+pay\s+paid\s+ed25519:9uk3f8\.\.\.UaamR\s+api\.test\s+0\.02 NEAR\s+pass\s+daily candles.*~$/);
+    expect(lines[2]).toMatch(/#12\s+pay\s+paid\s+ed25519:9uk3f8\.\.\.UaamR\s+api\.test\s+0\.02 NEAR\s+pass\s+daily candles/);
+    expect(out.join('\n')).not.toContain('~');
+    // The rest of the memo continues under the memo column.
+    const memoColumn = (lines[2] ?? '').indexOf('daily candles');
+    expect(lines[3]?.slice(0, memoColumn).trim()).toBe('');
+    expect(lines.slice(2).map((l) => l.slice(memoColumn)).join(' ')).toBe('daily candles for the NEAR/USDC report | /dataset');
     out.length = 0;
     expect(await run(['receipts'])).toBe(EXIT.ok);
     expect(out.join('\n')).toContain('daily candles for the NEAR/USDC report ~');

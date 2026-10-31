@@ -306,7 +306,12 @@ async function ping(values: Values, io: CliIo): Promise<number> {
   return EXIT.ok;
 }
 
-function receiptRows(list: Receipt[]): string[][] {
+/**
+ * Table rows of receipts. On a terminal (`columns` known) the memo is shown
+ * in full and wraps under itself; piped output keeps one line per receipt,
+ * with the memo cut at 40 characters (`~`).
+ */
+function receiptRows(list: Receipt[], columns?: number): string[][] {
   return list.map((r) => [
     `#${r.id}`,
     r.kind,
@@ -315,7 +320,7 @@ function receiptRows(list: Receipt[]): string[][] {
     r.payee,
     formatAmount(r.amount, r.asset),
     r.delivered === null ? '' : r.delivered ? 'pass' : 'FAIL',
-    r.memo.length > 40 ? `${r.memo.slice(0, 39)}~` : r.memo,
+    columns === undefined && r.memo.length > 40 ? `${r.memo.slice(0, 39)}~` : r.memo,
   ]);
 }
 
@@ -328,7 +333,7 @@ async function receipts(values: Values, io: CliIo): Promise<number> {
     ...(values.limit !== undefined ? { limit: intOf(values.limit, '--limit') } : {}),
   });
   await learnTokens(client, list.map((r) => r.asset));
-  print(io, values, list, () => (list.length ? table(RECEIPT_HEADERS, receiptRows(list), io.columns) : 'no receipts'));
+  print(io, values, list, () => (list.length ? table(RECEIPT_HEADERS, receiptRows(list, io.columns), io.columns) : 'no receipts'));
   return EXIT.ok;
 }
 
@@ -374,7 +379,7 @@ async function ledger(values: Values, io: CliIo): Promise<number> {
     for (const p of pending) {
       out.push(`  #${p.id} receipt #${p.receipt_id}: ${formatAmount(p.amount, p.asset)} -> ${p.payee} "${p.memo}" (expires ${iso(p.expires_at_ns)})`);
     }
-    out.push('', 'recent receipts', recent.length ? table(RECEIPT_HEADERS, receiptRows(recent), io.columns) : 'no receipts');
+    out.push('', 'recent receipts', recent.length ? table(RECEIPT_HEADERS, receiptRows(recent, io.columns), io.columns) : 'no receipts');
     out.push('', `ledger page: ${ledgerUrl(rpcUrl, vaultId)}`);
     return out.join('\n');
   });
