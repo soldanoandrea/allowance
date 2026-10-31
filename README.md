@@ -646,7 +646,7 @@ Prompts from [near-hackathon-prompt-examples](https://github.com/nearai/near-hac
 | `npm run typecheck` | `tsc` strict over SDK, CLI, examples, demo API, risk service, testnet scripts, demo orchestrator and tests |
 | `make demo` | the whole story on a sandbox with eleven on-chain checks; non-zero exit if one fails |
 
-Contract-only targets: `make build` (vault 385,388 bytes with the ABI
+Contract-only targets: `make build` (vault 385,386 bytes with the ABI
 embedded; factory 171,067; test token 154,819), `make size`, `make test-unit`
 (seconds), `make test-sandbox`, `make clippy`, `make fmt`.
 
