@@ -405,3 +405,18 @@ design says.
     instead of a second node, to keep the run short and avoid two
     neard-sandbox processes competing in CI.
 
+77. **The demo video is rendered, not screen-recorded.** `make video` runs
+    `docs/demo.tape` with VHS (headless terminal, ttyd + Chrome) in a fresh
+    clone under `$TMPDIR`, so no local path or prompt shows. VHS drives one
+    terminal, so `make demo-manual` runs in the background and writes its
+    log; `scripts/video/scene.ts` prints each scene's slice of that live log
+    at reading pace, cut to 120 columns, with a caption instead of a
+    voice-over; the owner's approval, the ledger, the kill switch and the
+    refused payment are real CLI commands typed against the same chain.
+    Captions are printed in capitals so the tape can wait for them on
+    screen without matching the hidden command that started the scene. The
+    result is 1:58 (under X's 2:20 limit for standard accounts), a 1.5 MB
+    H.264 MP4 and a 3 MB GIF, both committed; the GIF's colours are paler
+    (one 128-colour palette for the whole video). To support this, the demo
+    now prints repository-relative key paths and the CLI fits its receipts
+    table to the terminal width.

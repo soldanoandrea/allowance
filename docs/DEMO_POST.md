@@ -3,7 +3,8 @@
 Not posted. The rules ask for a public X post that says the project was
 built at NEAR HACKATHON, tags @NEARProtocol and #NEARHackathon, and attaches
 the demo video (screenshots alone are not enough). Replace `<REPO_URL>`
-before posting; attach the video from [DEMO_SCRIPT.md](DEMO_SCRIPT.md).
+before posting; attach [media/demo.mp4](media/demo.mp4) (1:58, rendered by
+`make video`), or a narrated recording made from [DEMO_SCRIPT.md](DEMO_SCRIPT.md).
 
 ## Main post (under 280 characters)
 

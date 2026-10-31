@@ -6,7 +6,9 @@
  * pace: it waits until the lines between --from and --to exist in the log,
  * clears the screen, prints a caption, then the lines (optionally filtered),
  * cut to the terminal width so nothing wraps. It never changes the text of a
- * line, apart from that cut and from shortening the repository path.
+ * line, apart from that cut and from shortening the repository path. The
+ * caption is printed in capitals, so the tape can wait for it on screen
+ * without matching the (hidden) command line that started the scene.
  *
  *   node scripts/video/scene.ts --log <file> --title <text> [--note <text>]
  *        --from <regex> --to <regex> [--after <regex>] [--keep <regex>]
@@ -80,11 +82,22 @@ const shown = scene
   .map((l) => (l.length >= columns ? `${l.slice(0, columns - 2)}~` : l));
 
 process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
-if (values.title) process.stdout.write(`\x1b[1;30;46m ${values.title} \x1b[0m\n`);
+if (values.title) process.stdout.write(`\x1b[1;30;46m ${values.title.toUpperCase()} \x1b[0m\n`);
 if (values.note) process.stdout.write(`\x1b[36m${values.note}\x1b[0m\n`);
 if (values.title || values.note) process.stdout.write('\n');
+/** Colour by speaker; refusals in red, passed checks in green. */
+function colorOf(line: string): string {
+  if (/^ {2}ok\b|^demo OK/.test(line)) return '\x1b[32m';
+  if (/^ {2}FAIL\b|^demo FAILED/.test(line)) return '\x1b[1;31m';
+  if (line.startsWith('===')) return '\x1b[1m';
+  if (line.startsWith('[api]')) return '\x1b[33m';
+  if (line.startsWith('[owner]')) return '\x1b[35m';
+  if (/: BLOCK\b|REFUSED|refused by the NEAR protocol|: rejected \(receipt|REJECTED by|error \[/.test(line)) return '\x1b[31m';
+  return '';
+}
+
 for (const line of shown) {
-  const color = line.startsWith('[api]') ? '\x1b[33m' : line.startsWith('[owner]') ? '\x1b[35m' : line.startsWith('===') ? '\x1b[1m' : /\bBLOCK\b|REFUSED|refused|rejected/.test(line) ? '\x1b[31m' : '';
+  const color = colorOf(line);
   process.stdout.write(`${color}${line}${color ? '\x1b[0m' : ''}\n`);
   await sleep(delayMs);
 }

@@ -1,5 +1,15 @@
 # Demo video script (under 3 minutes)
 
+**Rendered version.** `make video` records this script without a human:
+[demo.tape](demo.tape) runs `make demo-manual` against a live local sandbox
+with VHS, shows each scene's real output with a caption in place of the
+voice-over, and types the owner's commands (ledger, approve, kill, the
+refused payment) for real. Output: [media/demo.mp4](media/demo.mp4) (1:58,
+H.264, about 1.5 MB, ready to attach to the X post) and
+[media/demo.gif](media/demo.gif). It is under 2:20, the longest video a
+standard (non-Premium) X account can post. The table below is the storyline
+for a narrated recording by a human.
+
 One take per scene, screen capture plus voice-over. Everything runs on a
 local sandbox with `make demo-manual` (the same story as `make demo`, but you
 play the owner who approves the large payment). If the testnet run of

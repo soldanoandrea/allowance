@@ -27,6 +27,13 @@ split forwards a share of every incoming payment to beneficiaries, vaults
 pay each other through `deposit`, and a **factory** spins up vaults from one
 global contract for ~0.003 NEAR of storage each.
 
+**Demo video** (1:58, recorded by a script against a live local sandbox, no
+editing): [docs/media/demo.mp4](docs/media/demo.mp4). Regenerate it with
+`make video` ([docs/demo.tape](docs/demo.tape), scene by scene from
+[docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)).
+
+![Allowance demo: owner policy, an agent paying a 402 API, one counteroffer, a human approval, a stablecoin payment, a prompt-injection attack that moves no money, a revenue split, the kill switch](docs/media/demo.gif)
+
 ## Quickstart (local, nothing to sign up for)
 
 Requirements: Rust stable >= 1.95 with the `wasm32-unknown-unknown` target,
@@ -42,6 +49,7 @@ make demo         # build, start a local sandbox, run the whole story, exit (fir
 make demo-keep    # same, then keep the chain and the API running and print the ledger URL and CLI commands
 make demo-manual  # like demo-keep, but YOU approve the payment that waits for a human (for recording the video)
 make check        # everything CI runs: cargo test --workspace, TypeScript type-check + tests, make demo
+make video        # optional: re-record docs/media/demo.mp4 + demo.gif with VHS (brew install vhs)
 ```
 
 `make demo` runs `npm ci`, `cargo near build` (vault, factory, test token),
@@ -621,7 +629,10 @@ demo-api/            paid HTTP API (402 + verify_receipt), tests
 ledger/              static ledger page: index.html, core.js (data), app.js (rendering)
 examples/local_demo/ run.ts (`make demo`), sandbox_node.rs (hosts neard-sandbox), .tmp/ (ignored, sandbox keys)
 scripts/testnet/     the testnet demo (prepared, dry run by default) and its configuration check
-docs/                DECISIONS.md, PAYMENT_FLOW.md, attack-log.md, TESTNET.md, DEMO_SCRIPT.md, DEMO_POST.md, SUBMISSION.md
+docs/                DECISIONS.md, PAYMENT_FLOW.md, attack-log.md, TESTNET.md, DEMO_SCRIPT.md, DEMO_POST.md, SUBMISSION.md,
+                     FRESH_CLONE_CHECK.md, demo.tape (the video script for VHS), media/ (demo.mp4, demo.gif)
+scripts/video/       `make video`: render.sh (records the tape in a fresh clone) and scene.ts (prints the live log scene by scene)
+.github/workflows/   test.yml (CI), pages.yml (ledger page on GitHub Pages)
 DESIGN.md            product spec
 ```
 

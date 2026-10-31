@@ -71,7 +71,7 @@ Sleep 2s
 Hide
 Type `scene --title "1/7  The owner sets the rules" --note "Deploy and fund the vault, write the policy on-chain, register each agent as a function-call key on the vault" --from '^=== 2\.' --to 'token agent key' --delay 120`
 Enter
-Wait+Screen /1\/7  The owner/
+Wait+Screen /THE OWNER SETS/
 Show
 Wait
 Sleep 7s
@@ -80,7 +80,7 @@ Sleep 7s
 Hide
 Type `scene --title "2/7  The agent buys data" --note "HTTP 402 with a price -> counterparty check -> free simulate -> pay from the vault -> the API verifies the receipt" --from 'task: daily candles' --to '=> delivered' --drop 'event |\[agent\] GET|\[agent\] $' --delay 220`
 Enter
-Wait+Screen /2\/7  The agent/
+Wait+Screen /THE AGENT BUYS/
 Show
 Wait
 Sleep 7s
@@ -89,7 +89,7 @@ Sleep 7s
 Hide
 Type `scene --title "3/7  Above its limit, it negotiates once" --note "simulate says NEEDS_APPROVAL; the agent offers its autonomous limit (0.5 NEAR) and the seller accepts" --from 'task: order-book' --to '=> delivered' --drop 'event |\[agent\] GET|\[agent\] $' --delay 200`
 Enter
-Wait+Screen /3\/7  Above/
+Wait+Screen /NEGOTIATES ONCE/
 Show
 Wait
 Sleep 6s
@@ -98,7 +98,7 @@ Sleep 6s
 Hide
 Type `scene --title "4/7  A human approves" --note "The seller refuses the counteroffer: the 0.8 NEAR payment waits for the owner" --from 'task: a year of hourly' --to 'waiting for the owner' --drop 'event |\[agent\] GET|\[agent\] $' --delay 200`
 Enter
-Wait+Screen /4\/7  A human/
+Wait+Screen /A HUMAN APPROVES/
 Show
 Wait
 Sleep 3s
@@ -116,9 +116,9 @@ Enter
 Wait
 Sleep 2s
 Hide
-Type `scene --title "4/7  A human approves" --note "The contract checked the policy again at approval time and paid; the API verified the receipt and delivered" --from 'receipt #4: paid by' --to 'total spent' --delay 150`
+Type `scene --title "4/7  Approved by the owner" --note "The contract checked the policy again at approval time and paid; the API verified the receipt and delivered" --from 'receipt #4: paid by' --to 'total spent' --delay 150`
 Enter
-Wait+Screen /receipt #4: paid by/
+Wait+Screen /APPROVED BY THE OWNER/
 Show
 Wait
 Sleep 4s
@@ -127,7 +127,7 @@ Sleep 4s
 Hide
 Type `scene --title "5/7  Stablecoins (NEP-141)" --note "A second agent pays 2 SUSD: the vault registers the API on the token (storage_deposit), then ft_transfer" --from '^=== 4b\.' --to 'now holds 2 SUSD' --keep '^===|HTTP 402|simulate|pay tx|ft_payee_registration|payment_paid|verified|holds' --delay 250`
 Enter
-Wait+Screen /5\/7  Stablecoins/
+Wait+Screen /STABLECOINS/
 Show
 Wait
 Sleep 6s
@@ -136,7 +136,7 @@ Sleep 6s
 Hide
 Type `scene --title "6/7  The attack" --note "A web page hides an instruction to pay an attacker. Even a compromised process that signs anyway moves no money" --from '^=== 5\.' --to 'vault available:' --drop 'event |agent key ed25519|counterparty-risk check on|\[agent\] GET' --delay 110`
 Enter
-Wait+Screen /6\/7  The attack/
+Wait+Screen /THE ATTACK/
 Show
 Wait
 Sleep 9s
@@ -145,7 +145,7 @@ Sleep 9s
 Hide
 Type `scene --title "7/7  A business, not just a wallet" --note "The API keeps its revenue in its own vault; a revenue split forwards 10% to its data provider in the same transaction" --from '^=== 6\.' --to 'demo OK' --keep '^=== 6|^\[demo\]|\[agent\] (simulate|pay tx)|^checks|^  (ok|FAIL)|demo (OK|FAILED)' --delay 140`
 Enter
-Wait+Screen /7\/7  A business/
+Wait+Screen /NOT JUST A WALLET/
 Show
 Wait
 Sleep 7s
