@@ -2,7 +2,7 @@
 
 *Design document, 2026-10-30. Target: NEAR Hackathon (Nov 1–14, 2026), tracks `security`, `agents`, `business` (+ `open`). Working name "Allowance"; repo `near-agent-vault`. No code exists yet; this is the plan the build agents execute from Nov 1.*
 
-> **Status note (2026-10-31).** This is the plan as written before the first line of code, kept unedited below. The build started the same day, 2026-10-30, not on Nov 1: that is inside the window that opened with the 2026-10-19 announcement (HACKATHON.md Q-001), so the whole repository is hackathon work (README, "Timeline"). The day-by-day schedule in section 8 and some names in sections 3 and 6 (`allowance init`, `cargo run --example local_demo`) therefore differ from what was built; README.md and docs/DECISIONS.md describe the code as it is.
+> **Status note (2026-10-31).** This is the plan as written before the first line of code, kept unedited below except the "What is original here" paragraph of section 2, revised after review. The build started the same day, 2026-10-30, not on Nov 1: that is inside the window that opened with the 2026-10-19 announcement (HACKATHON.md Q-001), so the whole repository is hackathon work (README, "Timeline"). The day-by-day schedule in section 8 and some names in sections 3 and 6 (`allowance init`, `cargo run --example local_demo`) therefore differ from what was built; README.md and docs/DECISIONS.md describe the code as it is.
 
 ## 1. Pitch
 
@@ -23,7 +23,7 @@ AI agents that spend money today hold either a full-access key (one prompt injec
 - *Coinbase Agentic Wallets* (Feb 2026, via secondary sources): session caps, per-transaction limits, allowlists, enforced in Coinbase's MPC/enclave policy engine, custodial.
 - Hackathon-grade EVM contracts (AgentScope, PGAP, AgentBlox, AgentSafe on Solana): per-tx + daily caps + cooldowns on-chain.
 
-**What is original here**
+**What is original here** *(revised 2026-10-31 after review)*. None of the building blocks is new: method-scoped keys on a contract account are what NEAR's own multisig contract and Keypom already do; ERC-4337/7579 session keys and Coinbase Spend Permissions give an EVM agent a scoped key with periodic limits; the Safe Allowance module enforces per-delegate allowances on-chain; OutLayer Agent Custody and Coinbase Agentic Wallets run rich policy engines, in a TEE or custodial infrastructure. What the combination adds: a policy enforced on-chain with a free pre-check (`simulate`), receipts a seller verifies in one RPC view, keyless counterparty risk, a kill switch at the protocol level, and a factory of vaults from one global contract. README.md, "Prior art, and what is new here", has the detail.
 1. **Two-layer, fully on-chain, non-custodial enforcement**: protocol access key (contract + method + gas) × contract policy (amount, budget window, allowlist, time, cooldown, approval). No TEE, no vendor, no API key; the policy is public and auditable, and a leaked agent key is bound by exactly the same rules.
 2. **Agent = key, not account**: the agent needs no NEAR, no account, no faucet; the vault pays gas inside the key allowance; the vault itself adds/rotates/deletes the key. Kill switch = `DeleteKey` + pause.
 3. **Free dry-run**: `simulate` is a view call returning *allow / needs-approval / block(reason)* — the "counterparty check" the security track asks for, with zero gas, so the agent plans before it spends.

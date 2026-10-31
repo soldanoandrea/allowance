@@ -157,8 +157,66 @@ npx allowance pay --payee api.sandbox --amount 0.01 --force --key-file $K     # 
 | Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 83 Rust tests (72 unit, 11 on neard-sandbox) and 133 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
 | Design | two independent layers: the protocol scopes the agent key (methods, gas, no deposits), the contract checks the money; free `simulate` before every payment; receipts a payee verifies with one view, no facilitator ([docs/PAYMENT_FLOW.md](docs/PAYMENT_FLOW.md)); every trade-off written down in [docs/DECISIONS.md](docs/DECISIONS.md); a static ledger page with no build | `npx allowance ledger`, [ledger/](ledger/) |
 | Impact | an agent that pays for APIs, data or other agents with bounded loss: the prompt-injection attack in [docs/attack-log.md](docs/attack-log.md) moves no money; stablecoin prices; income, revenue split and vault-to-vault payments for agent businesses; ~0.003 NEAR of storage per vault through the factory | `make demo` (steps 4-6), [demo video](docs/media/demo.mp4) |
-| Originality | the agent is a function-call key **on the vault account itself**: no agent account, no faucet, no custodian, and the kill switch is `DeleteKey` at protocol level; x402-style receipts bound to the request hash; counterparty risk from public chain data (account age, code changes, history in this vault) | [How a payment flows](#how-a-payment-flows), `risk/` |
+| Originality | none of the building blocks is new (method-scoped keys, session keys, allowance modules, policy engines, x402); the combination is: a policy enforced on-chain with a free pre-check, receipts a seller verifies in one RPC view, keyless counterparty risk, a kill switch at protocol level, and a factory, on an agent that is only a key on the vault | [Prior art, and what is new here](#prior-art-and-what-is-new-here) |
 | Sustainability | MIT; CI on every push ([.github/workflows/test.yml](.github/workflows/test.yml)); TypeScript runs without a build step, dependencies pinned with one lockfile; immutable vault code by hash for every factory vault; ledger page deployable to GitHub Pages ([.github/workflows/pages.yml](.github/workflows/pages.yml)); the testnet run is scripted and dry-run by default ([docs/TESTNET.md](docs/TESTNET.md)) | `make test`, `npm test` |
+
+## Prior art, and what is new here
+
+Every building block of Allowance exists somewhere already:
+
+* **Method-scoped keys on a contract account (NEAR).** NEAR's own multisig
+  contract (near/core-contracts) adds each member as a function-call key on
+  the multisig account, limited to its request and confirm methods;
+  [Keypom](https://github.com/keypom/keypom) puts keys on its contract
+  limited to its claim methods. Allowance's agent key is the same protocol
+  primitive.
+* **Session keys and spend permissions (EVM).** ERC-4337 / ERC-7579 smart
+  accounts give a delegate a session key scoped to targets and functions,
+  with spending limits, and the account or a paymaster pays its gas;
+  Coinbase Spend Permissions give a spender a recurring allowance on a
+  Smart Wallet. That is an agent with a scoped key and periodic limits.
+* **Safe Allowance module.** A per-delegate, per-token allowance with a
+  reset period, enforced on-chain; no payee allowlist, no human approval
+  above a threshold, and the owner's key bypasses it.
+* **OutLayer Agent Custody.** Keys held in a TEE, with a rich policy
+  engine (per-transaction and periodic caps, allow and deny lists, time
+  windows, multisig above a threshold, freeze), evaluated off-chain inside
+  the TEE.
+* **Coinbase Agentic Wallets.** Session caps, per-transaction limits and
+  allowlists, enforced in Coinbase's custodial MPC / enclave
+  infrastructure.
+* **x402.** HTTP 402 with a price, the client pays, and the server (usually
+  through a facilitator) checks the payment before serving.
+
+What the combination adds, precisely:
+
+1. **The policy is enforced on-chain, with a free pre-check.** Caps,
+   budget windows, allow and deny lists, time windows, cooldowns, human
+   approval and expiry live in a public contract, so a leaked agent key is
+   bound by exactly the same rules as an honest one, without a TEE, a
+   custodian or a smart-account stack; `simulate` runs the same `evaluate`
+   as `pay` as a free view, so the agent knows *allow / needs approval /
+   block + reason* before it signs. And a key that keeps getting refused is
+   disabled by the vault itself.
+2. **Receipts a seller verifies in one RPC view.** On a vault the seller
+   trusts (by account, or by its immutable code hash), `verify_receipt(id,
+   payee, min_amount, request_hash, asset)` answers whether this exact
+   request was paid, in this asset: the 402 flow needs no facilitator and
+   works with function-call keys.
+3. **Keyless counterparty risk.** `risk/` judges the payee from public chain
+   data only (deny-lists, account age, recent code changes, code its
+   publisher can swap, history in this vault), needs no API key, and writes
+   its verdict into the receipt's memo.
+4. **A kill switch at the protocol level.** `kill` deletes every agent key
+   from the vault account in the same transaction (`DeleteKey`): the
+   network refuses the next transaction, not a flag the contract has to
+   remember.
+5. **A factory.** Vaults are created from one NEAR global contract by code
+   hash, for about 0.003 NEAR of storage each, with no access key, and a
+   payee can trust every factory vault by its immutable code hash.
+
+The agent itself is only a key on the vault account: no account, no
+faucet, its gas paid inside the key's allowance.
 
 ## Architecture
 
