@@ -34,6 +34,10 @@ export interface PolicySpec {
   expiresAt?: Date;
   /** Token policies: NEAR the vault may attach to register a payee on the token ("0.01"). */
   ftStorageDeposit?: string;
+  /** The vault disables the agent after this many rejected payments in a row (contract default 5). */
+  maxConsecutiveRejections?: number;
+  /** Most approval requests open at once; asking for one more disables the agent (contract default 3). */
+  maxOpenApprovals?: number;
 }
 
 /** Build the contract's `Policy` JSON from human units. */
@@ -62,5 +66,7 @@ export function buildPolicy(spec: PolicySpec): Policy {
   }
   if (spec.expiresAt) policy.expires_at_ns = (BigInt(spec.expiresAt.getTime()) * 1_000_000n).toString();
   if (spec.ftStorageDeposit) policy.ft_storage_deposit = parseNear(spec.ftStorageDeposit).toString();
+  if (spec.maxConsecutiveRejections !== undefined) policy.max_consecutive_rejections = spec.maxConsecutiveRejections;
+  if (spec.maxOpenApprovals !== undefined) policy.max_open_approvals = spec.maxOpenApprovals;
   return policy;
 }

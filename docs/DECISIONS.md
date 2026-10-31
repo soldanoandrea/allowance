@@ -420,3 +420,31 @@ design says.
     (one 128-colour palette for the whole video). To support this, the demo
     now prints repository-relative key paths and the CLI fits its receipts
     table to the terminal width.
+
+78. **A key that keeps getting refused disables itself (2026-10-31, after
+    review).** A leaked or looping key could not move money, but every
+    refused `pay` wrote a `rejected` receipt into the vault's storage and
+    every payment above the threshold opened an approval request, limited
+    only by the key's gas allowance. Two policy fields now bound that:
+    `max_consecutive_rejections` (default 5) and `max_open_approvals`
+    (default 3), both 1 to 100, both optional in the JSON so existing
+    policies keep working. A rejection increments
+    `state.consecutive_rejections`; a payment that reaches the transfer
+    (from `pay` or from `approve`) resets it. When it reaches the limit,
+    or when a payment would need one approval more than
+    `max_open_approvals` allows (new rejection `too_many_open_approvals`,
+    checked last in `evaluate`, so `simulate` reports it for free), the
+    vault sets `active = false`, records `auto_disabled {reason,
+    consecutive_rejections, receipt_id, at_ns}` on the agent and emits
+    `agent_auto_disabled`. Only the owner re-enables it (`enable_agent`
+    clears the record and the count). A disabled agent's `pay` now panics
+    instead of writing an `agent_disabled` receipt: the failed transaction
+    is still on-chain for forensics, but it adds nothing to the vault's
+    storage, which is the point. Open requests are counted over the
+    approval queue (not expired), so the count cannot drift; requests the
+    owner approves re-run the policy as before and do not count as the
+    agent's rejections. We did not delete the key on auto-disable: the
+    owner may want to look before deciding, and `remove_agent`/`kill` are
+    one call away. Pausing the vault also counts against agents that keep
+    paying; agents that use the SDK simulate first and never sign while
+    paused.

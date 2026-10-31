@@ -204,6 +204,34 @@ pub struct Policy {
     /// above the storage reserve; at most [`MAX_FT_STORAGE_DEPOSIT`].
     #[serde(default)]
     pub ft_storage_deposit: Option<NearToken>,
+    /// After this many rejected payments in a row the vault disables the
+    /// agent itself (event `agent_auto_disabled`); a payment that goes
+    /// through resets the count and only the owner re-enables the agent
+    /// (`enable_agent`). Bounds what a leaked or looping key can write into
+    /// the vault's storage. 1 to 100, default 5.
+    #[serde(default = "default_max_consecutive_rejections")]
+    pub max_consecutive_rejections: u32,
+    /// Most approval requests this agent may have open at once. A payment
+    /// that would open one more is rejected (`too_many_open_approvals`) and
+    /// the agent is disabled, so a flood of requests never reaches the human.
+    /// 1 to 100, default 3.
+    #[serde(default = "default_max_open_approvals")]
+    pub max_open_approvals: u32,
+}
+
+/// Default of [`Policy::max_consecutive_rejections`].
+pub const DEFAULT_MAX_CONSECUTIVE_REJECTIONS: u32 = 5;
+/// Default of [`Policy::max_open_approvals`].
+pub const DEFAULT_MAX_OPEN_APPROVALS: u32 = 3;
+/// Upper bound of both auto-disable limits: a higher limit would defeat them.
+pub const MAX_AUTO_DISABLE_LIMIT: u32 = 100;
+
+fn default_max_consecutive_rejections() -> u32 {
+    DEFAULT_MAX_CONSECUTIVE_REJECTIONS
+}
+
+fn default_max_open_approvals() -> u32 {
+    DEFAULT_MAX_OPEN_APPROVALS
 }
 
 /// Upper bound for [`Policy::ft_storage_deposit`]. NEP-145 registrations cost
@@ -263,6 +291,12 @@ impl Policy {
         {
             return Err("approval_threshold must be below per_tx_cap".into());
         }
+        if !(1..=MAX_AUTO_DISABLE_LIMIT).contains(&self.max_consecutive_rejections) {
+            return Err("max_consecutive_rejections must be between 1 and 100".into());
+        }
+        if !(1..=MAX_AUTO_DISABLE_LIMIT).contains(&self.max_open_approvals) {
+            return Err("max_open_approvals must be between 1 and 100".into());
+        }
         Ok(())
     }
 }
@@ -279,6 +313,10 @@ pub struct SpendState {
     pub last_payment_ns: U64,
     /// Number of payments that reached the transfer stage.
     pub payments: u64,
+    /// Rejected payments since the last one that went through; the agent is
+    /// disabled when it reaches `max_consecutive_rejections`.
+    #[serde(default)]
+    pub consecutive_rejections: u32,
 }
 
 impl SpendState {
@@ -344,6 +382,8 @@ pub struct EvalContext {
     /// True when a human already approved this exact payment (`approve`):
     /// the approval threshold is then skipped, everything else is re-checked.
     pub approval_granted: bool,
+    /// Approval requests of this agent that are open (not expired) right now.
+    pub open_approvals: u32,
 }
 
 /// Positive outcome of [`evaluate`].
@@ -390,6 +430,9 @@ pub enum Rejection {
     /// The caller is not a registered agent (reported by `simulate` only;
     /// `pay` panics instead so that strangers cannot write receipts).
     UnknownAgent,
+    /// The payment needs a human approval but the agent already has
+    /// `max_open_approvals` requests open. `pay` disables the agent.
+    TooManyOpenApprovals { open: u32, max: u32 },
 }
 
 /// Decide whether a payment may go through.
@@ -408,6 +451,8 @@ pub enum Rejection {
 /// 9. `Cooldown` - `now_ns < last_payment_ns + cooldown_ns`
 /// 10. `OverBudget` - `spent_in_window + amount > budget.amount`
 /// 11. `InsufficientVaultBalance` - `amount > vault_available`
+/// 12. `TooManyOpenApprovals` - the payment needs an approval and the agent
+///     already has `max_open_approvals` requests open
 ///
 /// If everything passes: `NeedsApproval` when `amount > approval_threshold`
 /// and no approval was granted yet, otherwise `Pay`.
@@ -483,6 +528,12 @@ pub fn evaluate(
         && let Some(threshold) = policy.approval_threshold
         && req.amount > threshold
     {
+        if ctx.open_approvals >= policy.max_open_approvals {
+            return Err(Rejection::TooManyOpenApprovals {
+                open: ctx.open_approvals,
+                max: policy.max_open_approvals,
+            });
+        }
         return Ok(Decision::NeedsApproval { threshold });
     }
     Ok(Decision::Pay)
@@ -529,6 +580,8 @@ mod tests {
             approval_threshold: Some(millinear(500)),
             expires_at_ns: None,
             ft_storage_deposit: None,
+            max_consecutive_rejections: DEFAULT_MAX_CONSECUTIVE_REJECTIONS,
+            max_open_approvals: DEFAULT_MAX_OPEN_APPROVALS,
         }
     }
 
@@ -540,6 +593,7 @@ mod tests {
             payee_denylisted: false,
             vault_available: near(100),
             approval_granted: false,
+            open_approvals: 0,
         }
     }
 
@@ -1016,5 +1070,63 @@ mod tests {
             rejection,
             r#"{"code":"over_per_tx_cap","cap":"1000000000000000000000000"}"#
         );
+    }
+
+    #[test]
+    fn one_approval_request_too_many_is_rejected() {
+        let p = policy();
+        let state = SpendState::default();
+        let mut c = ctx(MONDAY);
+        c.open_approvals = DEFAULT_MAX_OPEN_APPROVALS - 1;
+        let req = PayRequest {
+            payee: &api(),
+            amount: millinear(800),
+            asset: &Asset::Near,
+        };
+        assert!(matches!(
+            evaluate(&p, &state, &req, &c),
+            Ok(Decision::NeedsApproval { .. })
+        ));
+        c.open_approvals = DEFAULT_MAX_OPEN_APPROVALS;
+        assert_eq!(
+            evaluate(&p, &state, &req, &c),
+            Err(Rejection::TooManyOpenApprovals { open: 3, max: 3 })
+        );
+        // Payments under the threshold, and payments a human already
+        // approved, never open a request and are not affected.
+        let small = PayRequest {
+            amount: millinear(100),
+            ..req.clone()
+        };
+        assert_eq!(evaluate(&p, &state, &small, &c), Ok(Decision::Pay));
+        c.approval_granted = true;
+        assert_eq!(evaluate(&p, &state, &req, &c), Ok(Decision::Pay));
+    }
+
+    #[test]
+    fn auto_disable_limits_have_defaults_and_bounds() {
+        let json = r#"{"per_tx_cap":"1","allow":"any"}"#;
+        let p: Policy = near_sdk::serde_json::from_str(json).unwrap();
+        assert_eq!(
+            p.max_consecutive_rejections,
+            DEFAULT_MAX_CONSECUTIVE_REJECTIONS
+        );
+        assert_eq!(p.max_open_approvals, DEFAULT_MAX_OPEN_APPROVALS);
+        for bad in [0, MAX_AUTO_DISABLE_LIMIT + 1] {
+            let mut q = p.clone();
+            q.max_consecutive_rejections = bad;
+            assert!(
+                q.validate()
+                    .unwrap_err()
+                    .contains("max_consecutive_rejections")
+            );
+            let mut q = p.clone();
+            q.max_open_approvals = bad;
+            assert!(q.validate().unwrap_err().contains("max_open_approvals"));
+        }
+        let mut q = p.clone();
+        q.max_consecutive_rejections = 1;
+        q.max_open_approvals = MAX_AUTO_DISABLE_LIMIT;
+        assert!(q.validate().is_ok());
     }
 }

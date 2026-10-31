@@ -1453,3 +1453,89 @@ async fn revenue_split_forwards_shares_of_income_including_vault_to_vault_paymen
     assert_eq!(income["split"][0]["status"], json!("failed"));
     Ok(())
 }
+
+// ----------------------------------------------------------------------
+// 10. a leaked key that keeps trying is disabled by the vault itself
+// ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_leaked_key_that_keeps_trying_is_disabled_by_the_vault() -> TestResult<()> {
+    let env = Env::new().await?;
+    env.deposit(&env.owner, near(5)).await?;
+    let agent = AgentKey::generate()?;
+    let mut policy = worker_policy(&env.payee);
+    policy["max_consecutive_rejections"] = json!(3);
+    policy["max_open_approvals"] = json!(2);
+    env.add_key_agent(&agent, "worker", policy).await?;
+    let attacker = create_account(&env.sandbox, "attacker.sandbox").await?;
+
+    // The compromised process signs pay() to the attacker again and again:
+    // each try is rejected with a receipt, the third in a row disables the agent.
+    for i in 1..=3u64 {
+        let (outcome, logs) = env.agent_pay(&agent, &attacker, millinear(100)).await?;
+        assert_eq!(outcome["outcome"], json!("rejected"));
+        assert_eq!(outcome["receipt_id"], json!(i));
+        assert_eq!(has_event(&logs, "agent_auto_disabled"), i == 3, "try {i}");
+    }
+    let view: Value = env
+        .view("get_agent", json!({"agent_id": agent.id()}))
+        .await?;
+    assert_eq!(view["active"], json!(false));
+    assert_eq!(view["auto_disabled"]["consecutive_rejections"], json!(3));
+    assert_eq!(view["auto_disabled"]["receipt_id"], json!(3));
+    assert_eq!(
+        view["auto_disabled"]["reason"]["code"],
+        json!("not_allowlisted")
+    );
+
+    // From now on its calls fail without writing anything: no receipt, no
+    // storage, and simulate says why for free.
+    let before: Value = env.view("get_vault", json!({})).await?;
+    let msg = failure_message(
+        env.agent_call(
+            &agent,
+            "pay",
+            json!({"payee": env.payee, "amount": yocto(millinear(10))}),
+        )
+        .await?,
+    );
+    assert!(msg.contains("agent is disabled"), "{msg}");
+    let after: Value = env.view("get_vault", json!({})).await?;
+    assert_eq!(after["next_receipt_id"], before["next_receipt_id"]);
+    assert_eq!(after["storage_usage_bytes"], before["storage_usage_bytes"]);
+    let sim: Value = env
+        .view(
+            "simulate",
+            json!({"agent_id": agent.id(), "payee": env.payee, "amount": yocto(millinear(10))}),
+        )
+        .await?;
+    assert_eq!(sim["reason"], json!({"code": "agent_disabled"}));
+
+    // Only the owner re-enables it; a payment that goes through resets the count.
+    let (_, logs) = env
+        .call_ok(&env.owner, "enable_agent", json!({"agent_id": agent.id()}))
+        .await?;
+    assert!(has_event(&logs, "agent_enabled"));
+    let (outcome, _) = env.agent_pay(&agent, &env.payee, millinear(10)).await?;
+    assert_eq!(outcome["outcome"], json!("paid"), "{outcome}");
+
+    // Approval requests: two may be open, asking for a third disables the
+    // agent; the two already queued stay in front of the human.
+    for pending_id in 0..2u64 {
+        let (outcome, _) = env.agent_pay(&agent, &env.payee, millinear(600)).await?;
+        assert_eq!(outcome["pending_id"], json!(pending_id), "{outcome}");
+    }
+    let (outcome, logs) = env.agent_pay(&agent, &env.payee, millinear(600)).await?;
+    assert_eq!(
+        outcome["reason"],
+        json!({"code": "too_many_open_approvals", "open": 2, "max": 2})
+    );
+    assert!(has_event(&logs, "agent_auto_disabled"));
+    let view: Value = env
+        .view("get_agent", json!({"agent_id": agent.id()}))
+        .await?;
+    assert_eq!(view["active"], json!(false));
+    let pending: Vec<Value> = env.view("get_pending", json!({})).await?;
+    assert_eq!(pending.len(), 2);
+    Ok(())
+}

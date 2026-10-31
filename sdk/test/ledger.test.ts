@@ -127,6 +127,13 @@ describe('ledger page data layer (ledger/core.js)', () => {
       'budget 2 NEAR per 1d',
       'payees: api.test',
       'human approval above 0.5 NEAR',
+      'auto-disabled after 5 rejections in a row or 3 open approvals',
     ]);
+    expect(
+      L.describeEvent({
+        event: 'agent_auto_disabled',
+        data: { agent: { key: 'ed25519:5p8Lt9SrU5EMhjH6JSVcqFHy8vBkLmrbbUPgB7RhB5Hw' }, receipt_id: 9, consecutive_rejections: 5, reason: { code: 'not_allowlisted', payee: 'attacker.test' } },
+      }),
+    ).toBe('ed25519:5p8Lt9...hB5Hw disabled by the vault after receipt #9 (5 rejected in a row: attacker.test is not on the allowlist)');
   });
 });

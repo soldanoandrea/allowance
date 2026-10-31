@@ -27,7 +27,7 @@ Build once: `make build` (writes `target/near/allowance.wasm`).
 Budget: the faucet sponsors the owner account with free testnet NEAR (top it
 up with the faucet described at https://docs.near.org/getting-started/faucet
 if needed). The vault needs about **4.5 NEAR** on its account before the
-deploy (the 385 KB contract locks ~3.9 NEAR of storage stake), plus the
+deploy (the 390 KB contract locks ~3.9 NEAR of storage stake), plus the
 deposit (2 NEAR by default, which covers the demo's 0.02 + 0.5 + 0.8 NEAR of
 purchases), plus 1 NEAR for the API account: about 8 NEAR in all.
 
@@ -157,8 +157,8 @@ full-access key so that only `owner_id` can manage it through the contract
 
 The factory (`factory/`) is tested on the sandbox. On testnet or mainnet it
 needs the vault code published once as a global contract by hash, which
-**burns** 10x the storage of the wasm (38.55 NEAR for the current
-385 KB build, measured on the sandbox), more than a faucet account holds:
+**burns** 10x the storage of the wasm (39.05 NEAR for the current
+390 KB build, measured on the sandbox), more than a faucet account holds:
 
 ```sh
 near contract deploy-as-global use-file target/near/allowance.wasm as-global-hash you.testnet network-config testnet sign-with-... send

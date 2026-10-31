@@ -10,7 +10,7 @@ money moves:
 | Layer | Enforced by | Limits |
 |---|---|---|
 | Access key | NEAR protocol, before the contract runs | only `pay`, `confirm_delivery`, `ping` on this contract; gas allowance; **no deposits can be attached** |
-| Policy | this contract, on every `pay` | asset (NEAR or one NEP-141 token), per-payment cap, budget per window, payee allowlist, vault denylist, time window, cooldown, human approval above a threshold, expiry, pause, kill |
+| Policy | this contract, on every `pay` | asset (NEAR or one NEP-141 token), per-payment cap, budget per window, payee allowlist, vault denylist, time window, cooldown, human approval above a threshold, expiry, pause, kill; an agent that keeps getting refused is disabled by the vault itself |
 
 Before it even asks the vault, the agent checks the payee with an off-chain,
 keyless **counterparty-risk service** (`risk/`: deny-lists, account age,
@@ -154,7 +154,7 @@ npx allowance pay --payee api.sandbox --amount 0.01 --force --key-file $K     # 
 | Criterion | Where it is demonstrated | Check it with |
 |---|---|---|
 | Runs and does what this README says | one command builds, starts a throw-away chain and plays the whole story with eleven on-chain checks (non-zero exit if one fails); a fresh clone following only this README is recorded in [docs/FRESH_CLONE_CHECK.md](docs/FRESH_CLONE_CHECK.md) | `make demo` |
-| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 75 Rust tests (65 unit, 10 on neard-sandbox) and 133 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
+| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 83 Rust tests (72 unit, 11 on neard-sandbox) and 133 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
 | Design | two independent layers: the protocol scopes the agent key (methods, gas, no deposits), the contract checks the money; free `simulate` before every payment; receipts a payee verifies with one view, no facilitator ([docs/PAYMENT_FLOW.md](docs/PAYMENT_FLOW.md)); every trade-off written down in [docs/DECISIONS.md](docs/DECISIONS.md); a static ledger page with no build | `npx allowance ledger`, [ledger/](ledger/) |
 | Impact | an agent that pays for APIs, data or other agents with bounded loss: the prompt-injection attack in [docs/attack-log.md](docs/attack-log.md) moves no money; stablecoin prices; income, revenue split and vault-to-vault payments for agent businesses; ~0.003 NEAR of storage per vault through the factory | `make demo` (steps 4-6), [demo video](docs/media/demo.mp4) |
 | Originality | the agent is a function-call key **on the vault account itself**: no agent account, no faucet, no custodian, and the kill switch is `DeleteKey` at protocol level; x402-style receipts bound to the request hash; counterparty risk from public chain data (account age, code changes, history in this vault) | [How a payment flows](#how-a-payment-flows), `risk/` |
@@ -360,7 +360,7 @@ are `U64` (JSON string of nanoseconds since the epoch). Enum variants are
 | `set_split` | `split` (`{beneficiaries: [{account_id, bps}]}`, up to 4, <= 100%) or `null` | revenue split of every income |
 | `add_agent` | `agent_id`, `label`, `policy`, `gas_allowance?` | key agents: `AddKey` on the vault account, registration completed in a callback (returns `true`); account agents: immediate. Token policies need a registered token |
 | `set_policy` | `agent_id`, `policy` | validates; bumps `policy_version`; counters kept |
-| `disable_agent` / `enable_agent` | `agent_id` | cheap, reversible; key untouched |
+| `disable_agent` / `enable_agent` | `agent_id` | cheap, reversible; key untouched. `enable_agent` also re-enables an agent the vault disabled itself (and resets its rejection count) |
 | `remove_agent` | `agent_id` | forgets the agent, `DeleteKey`, denies its queued approvals |
 | `top_up_allowance` | `public_key`, `allowance?` | `DeleteKey` + `AddKey` in one batch (allowances are immutable on NEAR) |
 | `set_denylist` | `accounts[]` | replaces the vault-wide denylist |
@@ -385,8 +385,13 @@ are `U64` (JSON string of nanoseconds since the epoch). Enum variants are
 | `confirm_delivery` | `receipt_id`, `passed` | records the agent's verdict on a paid receipt (once) |
 | `ping` | | `{agent, registered, label, active, paused, block_timestamp_ns}` |
 
-`pay` never panics for policy reasons; it panics only for malformed input or an
-unregistered caller (so strangers cannot write receipts).
+`pay` never panics for policy reasons; it panics only for malformed input, an
+unregistered caller (so strangers cannot write receipts) or a disabled agent
+(so a disabled key cannot either). After `max_consecutive_rejections`
+rejected payments in a row, or a request for one approval more than
+`max_open_approvals`, the vault disables the agent itself (event
+`agent_auto_disabled`, recorded as `auto_disabled` on the agent); only the
+owner re-enables it with `enable_agent`.
 
 ### Token receiver and views
 
@@ -426,7 +431,9 @@ near contract call-function as-read-only vault.you.testnet simulate \
   "cooldown_ns": "5000000000",                       // 5 s between payments; default 0
   "approval_threshold": "500000000000000000000000",  // above 0.5 NEAR a human approves; must be < per_tx_cap; optional
   "expires_at_ns": null,                             // optional
-  "ft_storage_deposit": null                         // token policies: NEAR (<= 0.1) the vault may attach to register an unregistered payee on the token
+  "ft_storage_deposit": null,                        // token policies: NEAR (<= 0.1) the vault may attach to register an unregistered payee on the token
+  "max_consecutive_rejections": 5,                   // the vault disables the agent after this many rejected payments in a row; default 5
+  "max_open_approvals": 3                            // asking for one approval more than this disables the agent; default 3
 }
 ```
 
@@ -445,9 +452,12 @@ reason, so the verdict is deterministic:
 9. `cooldown` - `now < last_payment + cooldown`, with `retry_at_ns`
 10. `over_budget` - `spent_in_window + amount > budget.amount`, with `remaining` and `resets_at_ns`
 11. `insufficient_vault_balance` - NEAR above the storage reserve, or the vault's token balance
+12. `too_many_open_approvals` - the payment needs an approval and the agent already has `max_open_approvals` open
 
 Then: `needs_approval` if `amount > approval_threshold` (unless a human already
-approved this exact payment), otherwise `pay`.
+approved this exact payment), otherwise `pay`. A rejection from `pay` counts
+towards `max_consecutive_rejections`; a payment that goes through resets the
+count.
 
 **Budget windows** are fixed buckets aligned to the epoch:
 `window_start = now - now % period_ns`; counters from an older window count as
@@ -496,8 +506,8 @@ the payee's split runs in the same transaction.
 ## Vault factory (`factory/`)
 
 The vault wasm is published once as a NEAR **global contract by code hash**
-(immutable; the publisher burns 10x the storage: 38.55 NEAR for the
-385 KB build on the sandbox). `create_vault(name, owner_id?, approver_id?, ...)`
+(immutable; the publisher burns 10x the storage: 39.05 NEAR for the
+390 KB build on the sandbox). `create_vault(name, owner_id?, approver_id?, ...)`
 creates `<name>.<factory>` with one batch (`CreateAccount`, `Transfer`,
 `UseGlobalContract`, `new`); the new vault stores ~312 bytes (~0.003 NEAR of
 stake) instead of its own ~3.9 NEAR copy of the code, has **no access key**
@@ -544,14 +554,15 @@ global code hash.
 * The key allowance is **gas only**: it caps what the agent can burn, not what
   it can spend. Spending limits are the policy. A key cannot attach deposits.
 * An exhausted gas allowance locks the agent, not the vault: `top_up_allowance`.
-* What a leaked key can still do until it is removed: burn its gas
-  allowance (default 1 NEAR) and use it to write `rejected` receipts and
-  approval requests. Neither moves money, but each rejected attempt costs the
-  vault gas plus the receipt's storage (about 0.002 NEAR together in the
-  attack demo; storage is reclaimable with `prune_receipts`), and open approval
-  requests per agent are not capped, so a flood of them lands in front of the
-  human. Mitigation today: a small `gas_allowance` per key, and `remove_agent` /
-  `kill` as soon as rejections appear.
+* A leaked key that keeps trying is stopped by the vault itself: after
+  `max_consecutive_rejections` refused payments in a row (default 5), or when
+  it asks for one approval more than `max_open_approvals` (default 3), the
+  agent is disabled (`agent_auto_disabled`), and from then on its `pay`
+  fails without writing a receipt. What it can still burn is gas from its
+  key's allowance (default 1 NEAR; set a smaller `gas_allowance` per key);
+  before the cut-off each refused attempt costs gas plus a receipt's storage
+  (about 0.002 NEAR together in the attack demo; storage is reclaimable with
+  `prune_receipts`). Tested in `tests/sandbox.rs` (section 10).
 * Budget windows are fixed, epoch-aligned buckets (see [Policy](#policy)): an
   agent that spends its whole budget just before a boundary can spend it again
   just after, so the worst case over any rolling `period_ns` is twice the
@@ -588,6 +599,7 @@ global code hash.
 | stretch | NEP-141 / USDC-style payments with storage check and payee registration | done (8 unit, 1 sandbox, demo scenario) |
 | stretch | Counterparty-risk service (age, code change, prior receipts, deny-list) | done (`risk/`, 16 tests, in the agent loop and the attack demo) |
 | stretch | Revenue split on income + vault-to-vault payments | done (7 unit, 1 sandbox, demo step) |
+| stretch | A key that keeps getting refused disables itself (rejections in a row, open approval requests) | done (7 unit, 1 sandbox; added after review) |
 | stretch | Vault factory on a global contract | done (5 unit, 1 sandbox test; TypeScript `FactoryClient` + `allowance factory` CLI, 10 unit tests, 1 sandbox end-to-end test; testnet/mainnet publishing is the documented plan) |
 | stretch | Sputnik DAO approver, Agent Market, NEAR Intents, owner web UI, NEP-413 relayer, TEE proofs | not started |
 
@@ -640,13 +652,13 @@ Prompts from [near-hackathon-prompt-examples](https://github.com/nearai/near-hac
 
 | Command | What |
 |---|---|
-| `cargo test` | vault: 60 unit tests (policy core, NEP-141 flows, split, contract on a mocked VM with mocked promise results) + 9 sandbox tests (`tests/sandbox.rs`: function-call key flows, NEP-141 with a real token, revenue split and vault-to-vault payments) + 1 factory sandbox test (`tests/factory.rs`) |
+| `cargo test` | vault: 67 unit tests (policy core, NEP-141 flows, split, auto-disable, contract on a mocked VM with mocked promise results) + 10 sandbox tests (`tests/sandbox.rs`: function-call key flows, NEP-141 with a real token, revenue split and vault-to-vault payments, a leaked key disabled by the vault) + 1 factory sandbox test (`tests/factory.rs`) |
 | `cargo test --workspace` | the above + 5 factory unit tests (what `make test` and CI run) |
 | `npm test` | 133 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
 | `npm run typecheck` | `tsc` strict over SDK, CLI, examples, demo API, risk service, testnet scripts, demo orchestrator and tests |
 | `make demo` | the whole story on a sandbox with eleven on-chain checks; non-zero exit if one fails |
 
-Contract-only targets: `make build` (vault 385,386 bytes with the ABI
+Contract-only targets: `make build` (vault 390,385 bytes with the ABI
 embedded; factory 171,067; test token 154,819), `make size`, `make test-unit`
 (seconds), `make test-sandbox`, `make clippy`, `make fmt`.
 

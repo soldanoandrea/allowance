@@ -362,7 +362,12 @@ async function ledger(values: Values, io: CliIo): Promise<number> {
     ];
     for (const a of agents) {
       const remaining = a.remaining_budget === null ? '' : `, ${formatAmount(a.remaining_budget, a.policy.asset)} left in window`;
-      out.push(`  ${describeAgent(a.id)} "${a.label}" ${a.active ? 'active' : 'DISABLED'}, policy v${a.policy_version}, ${a.state.payments} payment${a.state.payments === 1 ? '' : 's'}${remaining}`);
+      const status = a.active
+        ? 'active'
+        : a.auto_disabled
+          ? `DISABLED by the vault after receipt #${a.auto_disabled.receipt_id} (${describeRejection(a.auto_disabled.reason, a.policy.asset)}; ${a.auto_disabled.consecutive_rejections} rejected in a row), re-enable with enable_agent`
+          : 'DISABLED';
+      out.push(`  ${describeAgent(a.id)} "${a.label}" ${status}, policy v${a.policy_version}, ${a.state.payments} payment${a.state.payments === 1 ? '' : 's'}${remaining}`);
       for (const line of describePolicy(a.policy)) out.push(`    - ${line}`);
     }
     out.push('', `pending approvals (${pending.length})`);

@@ -30,8 +30,8 @@ use events::Event;
 use policy::{Asset, Decision, EvalContext, NS_PER_SEC, PayRequest, Policy, Rejection, evaluate};
 use split::{Split, SplitPayout, SplitStatus};
 use types::{
-    Agent, AgentId, AgentView, Failure, PayOutcome, Pending, PingResponse, Receipt, ReceiptKind,
-    ReceiptStatus, Simulation, TokenAccount, TokenView, VaultInfo, Verdict,
+    Agent, AgentId, AgentView, AutoDisabled, Failure, PayOutcome, Pending, PingResponse, Receipt,
+    ReceiptKind, ReceiptStatus, Simulation, TokenAccount, TokenView, VaultInfo, Verdict,
 };
 
 /// Methods an agent key may call. Everything else is refused by the protocol
@@ -555,10 +555,14 @@ impl Vault {
         Event::AgentDisabled { agent: agent_id }.emit();
     }
 
-    /// Owner: re-enable a disabled agent.
+    /// Owner: re-enable a disabled agent, including one the vault disabled
+    /// itself (its rejection count starts again from zero).
     pub fn enable_agent(&mut self, agent_id: AgentId) {
         self.assert_owner();
-        self.agent_mut(&agent_id).active = true;
+        let agent = self.agent_mut(&agent_id);
+        agent.active = true;
+        agent.auto_disabled = None;
+        agent.state.consecutive_rejections = 0;
         Event::AgentEnabled { agent: agent_id }.emit();
     }
 
@@ -732,6 +736,7 @@ impl Vault {
             payee_denylisted: self.denylist.contains(&pending.payee),
             vault_available: self.available_for(&pending.asset),
             approval_granted: true,
+            open_approvals: 0,
         };
         let decision = evaluate(
             &agent.policy,
@@ -820,7 +825,12 @@ impl Vault {
     /// `payee` under the caller's policy.
     ///
     /// Never panics for policy reasons: a refused payment is recorded as a
-    /// `rejected` receipt and returned as `{"outcome":"rejected",...}`. A
+    /// `rejected` receipt and returned as `{"outcome":"rejected",...}`. After
+    /// `max_consecutive_rejections` rejections in a row (or a request for one
+    /// approval more than `max_open_approvals`) the vault disables the agent
+    /// (`agent_auto_disabled`); a disabled agent's `pay` panics without
+    /// writing anything, so a leaked key cannot keep growing the vault's
+    /// storage. A
     /// payment above the approval threshold is queued and returned as
     /// `needs_approval`. Otherwise the budget is reserved, a `pending` receipt
     /// is written and the transfer is issued; the callback settles the receipt
@@ -857,6 +867,10 @@ impl Vault {
                 agent.policy_version,
             )
         };
+        require!(
+            active,
+            "agent is disabled; the owner re-enables it with enable_agent"
+        );
         let memo = memo.unwrap_or_default();
         require!(
             memo.len() <= MAX_MEMO_BYTES,
@@ -882,6 +896,7 @@ impl Vault {
             payee_denylisted: self.denylist.contains(&payee),
             vault_available: self.available_for(&asset),
             approval_granted: false,
+            open_approvals: self.open_approvals_of(&agent_id, now),
         };
         let decision = evaluate(
             &policy,
@@ -919,13 +934,14 @@ impl Vault {
                 let receipt_id = self.push_receipt(receipt);
                 Event::PaymentRejected {
                     receipt_id,
-                    agent: agent_id,
+                    agent: agent_id.clone(),
                     payee,
                     amount,
                     asset,
                     reason: reason.clone(),
                 }
                 .emit();
+                self.count_rejection(&agent_id, receipt_id, &reason, now);
                 PromiseOrValue::Value(PayOutcome::Rejected { receipt_id, reason })
             }
             Ok(Decision::NeedsApproval { .. }) => {
@@ -1093,6 +1109,7 @@ impl Vault {
             payee_denylisted: self.denylist.contains(&payee),
             vault_available,
             approval_granted: false,
+            open_approvals: self.open_approvals_of(&agent_id, now),
         };
         let decision = evaluate(
             &agent.policy,
@@ -1294,6 +1311,7 @@ impl Vault {
                 active: true,
                 policy_version: 1,
                 added_at_ns: U64(env::block_timestamp()),
+                auto_disabled: None,
             },
         );
         Event::AgentAdded {
@@ -1400,6 +1418,50 @@ impl Vault {
         }
     }
 
+    /// Approval requests of `agent_id` that have not expired at `now_ns`.
+    fn open_approvals_of(&self, agent_id: &AgentId, now_ns: u64) -> u32 {
+        let open = self
+            .pending
+            .values()
+            .filter(|p| &p.agent == agent_id && now_ns < p.expires_at_ns.0)
+            .count();
+        u32::try_from(open).unwrap_or(u32::MAX)
+    }
+
+    /// Count a rejected `pay` against the agent and disable it when it hits
+    /// `max_consecutive_rejections`, or at once when it asked for one approval
+    /// too many. Only the owner re-enables it (`enable_agent`).
+    fn count_rejection(
+        &mut self,
+        agent_id: &AgentId,
+        receipt_id: u64,
+        reason: &Rejection,
+        now_ns: u64,
+    ) {
+        let agent = self.agent_mut(agent_id);
+        agent.state.consecutive_rejections = agent.state.consecutive_rejections.saturating_add(1);
+        let count = agent.state.consecutive_rejections;
+        let trip = count >= agent.policy.max_consecutive_rejections
+            || matches!(reason, Rejection::TooManyOpenApprovals { .. });
+        if !trip {
+            return;
+        }
+        agent.active = false;
+        agent.auto_disabled = Some(AutoDisabled {
+            reason: reason.clone(),
+            consecutive_rejections: count,
+            receipt_id,
+            at_ns: U64(now_ns),
+        });
+        Event::AgentAutoDisabled {
+            agent: agent_id.clone(),
+            receipt_id,
+            consecutive_rejections: count,
+            reason: reason.clone(),
+        }
+        .emit();
+    }
+
     fn deny_pending_of(&mut self, agent_id: &AgentId) {
         let ids: Vec<u64> = self
             .pending
@@ -1428,6 +1490,8 @@ impl Vault {
             agent
                 .state
                 .record_payment(agent.policy.budget.as_ref(), amount, now);
+            // A payment that goes through ends a run of rejections.
+            agent.state.consecutive_rejections = 0;
             (
                 agent.state.window_start_ns,
                 agent.policy.ft_storage_deposit,
@@ -1733,7 +1797,9 @@ mod tests {
     use super::*;
     use near_sdk::test_utils::{VMContextBuilder, get_created_receipts, get_logs};
     use near_sdk::testing_env;
-    use policy::{Allow, AllowEntry, Budget};
+    use policy::{
+        Allow, AllowEntry, Budget, DEFAULT_MAX_CONSECUTIVE_REJECTIONS, DEFAULT_MAX_OPEN_APPROVALS,
+    };
 
     const DAY_NS: u64 = 86_400 * NS_PER_SEC;
     const T0: u64 = 1_793_577_600 * NS_PER_SEC;
@@ -1794,6 +1860,8 @@ mod tests {
             approval_threshold: Some(millinear(500)),
             expires_at_ns: None,
             ft_storage_deposit: None,
+            max_consecutive_rejections: DEFAULT_MAX_CONSECUTIVE_REJECTIONS,
+            max_open_approvals: DEFAULT_MAX_OPEN_APPROVALS,
         }
     }
 
@@ -2848,5 +2916,174 @@ mod tests {
         assert_eq!(pong.label.as_deref(), Some("worker"));
         set_caller(acc("stranger.test"), T0);
         assert!(!vault.ping().registered);
+    }
+
+    // ------------------------------------------------------------------
+    // Auto-disable: a leaked or looping key cannot flood the vault
+    // ------------------------------------------------------------------
+
+    fn reject_once(vault: &mut Vault) -> u64 {
+        match vault.pay(acc("attacker.test"), millinear(10), None, None, None) {
+            PromiseOrValue::Value(PayOutcome::Rejected { receipt_id, .. }) => receipt_id,
+            _ => panic!("expected a rejection"),
+        }
+    }
+
+    #[test]
+    fn consecutive_rejections_auto_disable_the_agent() {
+        let mut vault = vault_with_worker();
+        set_caller(acc("worker.test"), T0);
+        for _ in 0..DEFAULT_MAX_CONSECUTIVE_REJECTIONS - 1 {
+            reject_once(&mut vault);
+        }
+        let state = vault.get_agent_state(worker()).unwrap();
+        assert_eq!(
+            state.consecutive_rejections,
+            DEFAULT_MAX_CONSECUTIVE_REJECTIONS - 1
+        );
+        assert!(vault.get_agent(worker()).unwrap().active);
+
+        // A payment that goes through ends the run.
+        let _ = vault.pay(api(), millinear(20), None, None, None);
+        assert_eq!(
+            vault
+                .get_agent_state(worker())
+                .unwrap()
+                .consecutive_rejections,
+            0
+        );
+
+        let mut last = 0;
+        for _ in 0..DEFAULT_MAX_CONSECUTIVE_REJECTIONS {
+            last = reject_once(&mut vault);
+        }
+        let agent = vault.get_agent(worker()).unwrap();
+        assert!(
+            !agent.active,
+            "the fifth rejection in a row disables the agent"
+        );
+        let auto = agent.auto_disabled.expect("auto_disabled is recorded");
+        assert_eq!(auto.receipt_id, last);
+        assert_eq!(
+            auto.consecutive_rejections,
+            DEFAULT_MAX_CONSECUTIVE_REJECTIONS
+        );
+        assert_eq!(
+            auto.reason,
+            Rejection::NotAllowlisted {
+                payee: acc("attacker.test")
+            }
+        );
+        assert!(
+            events()
+                .iter()
+                .any(|e| e.contains("\"event\":\"agent_auto_disabled\"")
+                    && e.contains("\"consecutive_rejections\":5"))
+        );
+        assert_eq!(
+            vault.simulate(None, api(), millinear(20), None).reason,
+            Some(Rejection::AgentDisabled)
+        );
+
+        // Only the owner re-enables it, and the count starts again.
+        set_caller(owner(), T0);
+        vault.enable_agent(worker());
+        let agent = vault.get_agent(worker()).unwrap();
+        assert!(agent.active && agent.auto_disabled.is_none());
+        assert_eq!(agent.state.consecutive_rejections, 0);
+        set_caller(acc("worker.test"), T0);
+        assert!(matches!(
+            vault.pay(api(), millinear(20), None, None, None),
+            PromiseOrValue::Promise(_)
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "agent is disabled; the owner re-enables it with enable_agent")]
+    fn a_disabled_agent_cannot_write_receipts() {
+        let mut vault = vault_with_worker();
+        set_caller(acc("worker.test"), T0);
+        for _ in 0..DEFAULT_MAX_CONSECUTIVE_REJECTIONS {
+            reject_once(&mut vault);
+        }
+        let receipts = vault.get_vault().next_receipt_id;
+        assert_eq!(receipts, 1 + u64::from(DEFAULT_MAX_CONSECUTIVE_REJECTIONS));
+        reject_once(&mut vault);
+    }
+
+    #[test]
+    fn the_rejection_limit_is_per_policy() {
+        let mut vault = vault_with_worker();
+        set_caller(owner(), T0);
+        let mut p = policy();
+        p.max_consecutive_rejections = 2;
+        vault.set_policy(worker(), p);
+        set_caller(acc("worker.test"), T0);
+        reject_once(&mut vault);
+        assert!(vault.get_agent(worker()).unwrap().active);
+        reject_once(&mut vault);
+        assert!(!vault.get_agent(worker()).unwrap().active);
+    }
+
+    #[test]
+    fn one_approval_request_too_many_disables_the_agent() {
+        let mut vault = vault_with_worker();
+        set_caller(acc("worker.test"), T0);
+        for _ in 0..DEFAULT_MAX_OPEN_APPROVALS {
+            assert!(matches!(
+                vault.pay(api(), millinear(800), None, None, None),
+                PromiseOrValue::Value(PayOutcome::NeedsApproval { .. })
+            ));
+        }
+        let full = Rejection::TooManyOpenApprovals {
+            open: DEFAULT_MAX_OPEN_APPROVALS,
+            max: DEFAULT_MAX_OPEN_APPROVALS,
+        };
+        // simulate says so for free; small payments are not affected.
+        assert_eq!(
+            vault.simulate(None, api(), millinear(800), None).reason,
+            Some(full.clone())
+        );
+        assert_eq!(
+            vault.simulate(None, api(), millinear(20), None).verdict,
+            Verdict::Allow
+        );
+        match vault.pay(api(), millinear(800), None, None, None) {
+            PromiseOrValue::Value(PayOutcome::Rejected { reason, .. }) => assert_eq!(reason, full),
+            _ => panic!("expected too_many_open_approvals"),
+        }
+        let agent = vault.get_agent(worker()).unwrap();
+        assert!(!agent.active);
+        assert_eq!(agent.auto_disabled.unwrap().reason, full);
+        assert_eq!(
+            vault.get_pending().len(),
+            DEFAULT_MAX_OPEN_APPROVALS as usize
+        );
+
+        // The queued requests stay for the human; re-enabled, the agent can
+        // ask again once one is closed.
+        set_caller(owner(), T0);
+        vault.deny(0);
+        vault.enable_agent(worker());
+        set_caller(acc("worker.test"), T0);
+        assert_eq!(
+            vault.simulate(None, api(), millinear(800), None).verdict,
+            Verdict::NeedsApproval
+        );
+    }
+
+    #[test]
+    fn expired_requests_do_not_count_as_open() {
+        let mut vault = vault_with_worker();
+        set_caller(acc("worker.test"), T0);
+        for _ in 0..DEFAULT_MAX_OPEN_APPROVALS {
+            let _ = vault.pay(api(), millinear(800), None, None, None);
+        }
+        // The approval TTL of this vault is one day.
+        set_caller(acc("worker.test"), T0 + DAY_NS);
+        assert_eq!(
+            vault.simulate(None, api(), millinear(800), None).verdict,
+            Verdict::NeedsApproval
+        );
     }
 }

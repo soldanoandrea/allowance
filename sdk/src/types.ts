@@ -68,6 +68,10 @@ export interface Policy {
   expires_at_ns?: Ns | null;
   /** NEP-141 policies: NEAR (yocto) the vault may attach to register an unregistered payee on the token. */
   ft_storage_deposit?: Yocto | null;
+  /** The vault disables the agent after this many rejected payments in a row (1-100, default 5). */
+  max_consecutive_rejections?: number;
+  /** Most approval requests the agent may have open; one more disables it (1-100, default 3). */
+  max_open_approvals?: number;
 }
 
 export interface SpendState {
@@ -75,6 +79,17 @@ export interface SpendState {
   spent_in_window: Yocto;
   last_payment_ns: Ns;
   payments: number;
+  /** Rejected payments since the last one that went through. */
+  consecutive_rejections?: number;
+}
+
+/** Why and when the vault disabled an agent on its own (cleared by `enable_agent`). */
+export interface AutoDisabled {
+  /** The rejection that tripped the limit. */
+  reason: Rejection;
+  consecutive_rejections: number;
+  receipt_id: number;
+  at_ns: Ns;
 }
 
 /** Why the policy refused a payment (first failing check wins). */
@@ -90,7 +105,8 @@ export type Rejection =
   | { code: 'cooldown'; retry_at_ns: Ns }
   | { code: 'over_budget'; remaining: Yocto; resets_at_ns: Ns }
   | { code: 'insufficient_vault_balance'; available: Yocto }
-  | { code: 'unknown_agent' };
+  | { code: 'unknown_agent' }
+  | { code: 'too_many_open_approvals'; open: number; max: number };
 
 export type ReceiptStatus =
   | { status: 'paid' }
@@ -211,6 +227,8 @@ export interface AgentView {
   active: boolean;
   policy_version: number;
   added_at_ns: Ns;
+  /** Set when the vault disabled the agent itself. */
+  auto_disabled?: AutoDisabled | null;
   remaining_budget: Yocto | null;
   budget_resets_at_ns: Ns | null;
 }

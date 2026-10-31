@@ -39,6 +39,17 @@ pub enum Event {
     AgentDisabled { agent: AgentId },
     #[event_version("1.0.0")]
     AgentEnabled { agent: AgentId },
+    /// The vault disabled the agent itself: `consecutive_rejections` reached
+    /// the policy's `max_consecutive_rejections`, or the agent asked for one
+    /// approval more than `max_open_approvals` (`reason` is that rejection).
+    /// Only the owner re-enables it (`enable_agent`).
+    #[event_version("1.0.0")]
+    AgentAutoDisabled {
+        agent: AgentId,
+        receipt_id: u64,
+        consecutive_rejections: u32,
+        reason: Rejection,
+    },
     #[event_version("1.0.0")]
     PolicySet { agent: AgentId, policy_version: u32 },
     #[event_version("1.0.0")]

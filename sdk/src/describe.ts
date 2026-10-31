@@ -11,7 +11,7 @@ export function describeRejection(reason: Rejection, asset: Asset = 'near'): str
     case 'paused':
       return 'the vault is paused';
     case 'agent_disabled':
-      return 'this agent is disabled by the owner';
+      return 'this agent is disabled (only the owner re-enables it)';
     case 'policy_expired':
       return `the policy expired at ${iso(reason.expired_at_ns)}`;
     case 'asset_not_allowed':
@@ -32,6 +32,8 @@ export function describeRejection(reason: Rejection, asset: Asset = 'near'): str
       return `the vault only has ${formatAmount(reason.available, asset)} available`;
     case 'unknown_agent':
       return 'this key is not a registered agent of the vault';
+    case 'too_many_open_approvals':
+      return `${reason.open} approval requests already open (the policy allows ${reason.max})`;
   }
 }
 
@@ -90,6 +92,8 @@ export function describePolicy(policy: Policy): string[] {
   }
   if (policy.expires_at_ns) lines.push(`expires ${iso(policy.expires_at_ns)}`);
   if (policy.ft_storage_deposit) lines.push(`may pay up to ${near(policy.ft_storage_deposit)} to register a payee on the token`);
+  const open = policy.max_open_approvals ?? 3;
+  lines.push(`auto-disabled after ${policy.max_consecutive_rejections ?? 5} rejections in a row or ${open} open approval${open === 1 ? '' : 's'}`);
   return lines;
 }
 

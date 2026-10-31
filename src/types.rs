@@ -33,6 +33,23 @@ pub struct Agent {
     /// were evaluated under.
     pub policy_version: u32,
     pub added_at_ns: U64,
+    /// Set when the vault disabled the agent itself (too many rejected
+    /// payments in a row, or too many open approval requests); cleared by
+    /// `enable_agent`.
+    pub auto_disabled: Option<AutoDisabled>,
+}
+
+/// Why and when the vault disabled an agent on its own.
+#[near(serializers = [json, borsh])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoDisabled {
+    /// The rejection that tripped the limit.
+    pub reason: Rejection,
+    /// Rejected payments in a row at that moment.
+    pub consecutive_rejections: u32,
+    /// The `rejected` receipt of that payment.
+    pub receipt_id: u64,
+    pub at_ns: U64,
 }
 
 /// `Agent` plus its id and derived budget figures, for views.
@@ -46,6 +63,8 @@ pub struct AgentView {
     pub active: bool,
     pub policy_version: u32,
     pub added_at_ns: U64,
+    /// Set when the vault disabled the agent itself; see [`AutoDisabled`].
+    pub auto_disabled: Option<AutoDisabled>,
     /// Budget left in the current window (`None` without a budget).
     pub remaining_budget: Option<NearToken>,
     /// When the current budget window resets (`None` without a budget).
@@ -63,6 +82,7 @@ impl AgentView {
             active: agent.active,
             policy_version: agent.policy_version,
             added_at_ns: agent.added_at_ns,
+            auto_disabled: agent.auto_disabled.clone(),
             remaining_budget: budget.map(|b| agent.state.remaining_at(b, now_ns)),
             budget_resets_at_ns: budget.map(|b| U64(b.resets_at(now_ns))),
         }

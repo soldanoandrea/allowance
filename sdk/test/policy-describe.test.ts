@@ -63,7 +63,14 @@ describe('descriptions', () => {
       'budget 2 NEAR per 1d',
       'payees: api.test',
       'human approval above 0.5 NEAR',
+      'auto-disabled after 5 rejections in a row or 3 open approvals',
     ]);
+    const strict = buildPolicy({ perTxCap: '1', maxConsecutiveRejections: 2, maxOpenApprovals: 1 });
+    expect(strict).toMatchObject({ max_consecutive_rejections: 2, max_open_approvals: 1 });
+    expect(describePolicy(strict).at(-1)).toBe('auto-disabled after 2 rejections in a row or 1 open approval');
+    expect(describeRejection({ code: 'too_many_open_approvals', open: 3, max: 3 })).toBe(
+      '3 approval requests already open (the policy allows 3)',
+    );
   });
 
   it('builds and describes NEP-141 policies in token units', () => {
@@ -90,6 +97,7 @@ describe('descriptions', () => {
       'payees: api.test',
       'human approval above 5 SUSD',
       'may pay up to 0.01 NEAR to register a payee on the token',
+      'auto-disabled after 5 rejections in a row or 3 open approvals',
     ]);
     expect(describeRejection({ code: 'over_per_tx_cap', cap: '10000000' }, { ft: 'usd.test' })).toBe('amount is above the per-payment cap of 10 SUSD');
     expect(describeRejection({ code: 'asset_not_allowed', allowed: { ft: 'usd.test' } })).toContain('ft:usd.test');

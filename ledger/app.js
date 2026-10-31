@@ -120,7 +120,8 @@
         ]);
       }
       return h('div', { class: 'agent' }, [
-        h('div', { class: 'title' }, [h('strong', { text: a.label }), a.active ? badge('active', 'ok') : badge('disabled', 'bad')]),
+        h('div', { class: 'title' }, [h('strong', { text: a.label }), a.active ? badge('active', 'ok') : badge(a.auto_disabled ? 'disabled by the vault' : 'disabled', 'bad')]),
+        a.auto_disabled ? h('div', { class: 'muted', text: 'after receipt #' + a.auto_disabled.receipt_id + ': ' + L.describeRejection(a.auto_disabled.reason, a.policy.asset) + ', ' + a.auto_disabled.consecutive_rejections + ' rejected in a row; the owner re-enables it with enable_agent' }) : null,
         h('div', { class: 'mono muted', title: id, text: (a.id.key ? 'key ' : 'account ') + L.describeAgent(a.id) }),
         h('ul', null, L.describePolicy(a.policy).map(function (line) { return h('li', { text: line }); })),
         meter,

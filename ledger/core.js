@@ -258,6 +258,7 @@
       case 'over_budget': return 'over budget (' + fmt(r.remaining) + ' left)';
       case 'insufficient_vault_balance': return 'vault balance too low';
       case 'unknown_agent': return 'unknown agent';
+      case 'too_many_open_approvals': return r.open + ' approval requests already open (max ' + r.max + ')';
       default: return r.code;
     }
   }
@@ -278,6 +279,8 @@
     }
     if (p.expires_at_ns) lines.push('expires ' + isoFromNs(p.expires_at_ns));
     if (p.ft_storage_deposit) lines.push('may pay up to ' + formatNear(p.ft_storage_deposit) + ' to register a payee on the token');
+    var open = p.max_open_approvals || 3;
+    lines.push('auto-disabled after ' + (p.max_consecutive_rejections || 5) + ' rejections in a row or ' + open + ' open approval' + (open === 1 ? '' : 's'));
     return lines;
   }
 
@@ -293,6 +296,7 @@
       case 'payment_paid': return '#' + d.receipt_id + ' ' + amt() + ' -> ' + d.payee;
       case 'payment_failed': return '#' + d.receipt_id + ' ' + amt() + ' -> ' + d.payee + (d.reason ? ': ' + d.reason : '');
       case 'payment_rejected': return '#' + d.receipt_id + ' ' + amt() + ' -> ' + d.payee + ': ' + describeRejection(d.reason, d.asset);
+      case 'agent_auto_disabled': return describeAgent(d.agent) + ' disabled by the vault after receipt #' + d.receipt_id + ' (' + d.consecutive_rejections + ' rejected in a row: ' + describeRejection(d.reason) + ')';
       case 'approval_requested': return 'request #' + d.pending_id + ': ' + amt() + ' -> ' + d.payee;
       case 'ft_payee_registration': return '#' + d.receipt_id + ' registers ' + d.payee + ' on ' + d.token_id + ' (up to ' + formatNear(d.attached) + ')';
       case 'token_registered': return d.token_id;
