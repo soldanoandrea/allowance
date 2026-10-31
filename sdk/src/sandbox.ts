@@ -24,6 +24,8 @@ export const SANDBOX_NODE_BIN = join(REPO_ROOT, 'target', 'debug', 'examples', '
 export const VAULT_WASM = join(REPO_ROOT, 'target', 'near', 'allowance.wasm');
 /** The NEP-141 test token (tests/fixtures/test-token), built by `make build`. */
 export const TOKEN_WASM = join(REPO_ROOT, 'target', 'near', 'test_token', 'test_token.wasm');
+/** The vault factory (factory/), built by `make build`. */
+export const FACTORY_WASM = join(REPO_ROOT, 'target', 'near', 'allowance_factory', 'allowance_factory.wasm');
 
 export interface SandboxNode {
   rpcUrl: string;
@@ -36,6 +38,11 @@ export interface SandboxNode {
 /** What is missing to run the NEP-141 scenario, or null. */
 export function tokenPrerequisites(): string | null {
   return existsSync(TOKEN_WASM) ? null : `${TOKEN_WASM} is missing: run \`make build\``;
+}
+
+/** What is missing to run the factory scenario, or null. */
+export function factoryPrerequisites(): string | null {
+  return existsSync(FACTORY_WASM) ? null : `${FACTORY_WASM} is missing: run \`make build\``;
 }
 
 /** What is missing to run against a sandbox, or null when everything is there. */
@@ -269,3 +276,57 @@ export async function bootstrapToken(options: TokenBootstrapOptions): Promise<De
   log(`registered a second agent key ${agentPublicKey} with a ${symbol} policy`);
   return { tokenId, symbol, decimals, agentSecretKey: agentKey.toString() as KeyPairString, agentPublicKey };
 }
+
+export interface DemoFactory {
+  factoryId: string;
+  /** Account that published the vault code as a global contract. */
+  publisherId: string;
+  /** base58 sha256 of the vault wasm: the global contract every factory vault runs. */
+  codeHash: string;
+}
+
+/**
+ * Sandbox only: publish the vault wasm once as a global contract by code hash
+ * (from `publisher.<root>`, which burns 10x the storage, ~38 NEAR), then deploy
+ * the factory on `factory.<root>` pointing at that hash. Every vault the
+ * factory creates runs that exact code and cannot have it changed.
+ */
+export async function deployFactory(options: {
+  node: Pick<SandboxNode, 'rpcUrl' | 'rootAccountId' | 'rootSecretKey'>;
+  /** Factory owner (may point new vaults at another build). Default: the root account. */
+  ownerId?: string;
+  vaultWasmPath?: string;
+  factoryWasmPath?: string;
+  log?: (line: string) => void;
+}): Promise<DemoFactory> {
+  const log = options.log ?? (() => {});
+  const { node } = options;
+  const provider = new JsonRpcProvider({ url: node.rpcUrl });
+  const root = new Account(node.rootAccountId, provider, node.rootSecretKey);
+  const rootPk = KeyPair.fromString(node.rootSecretKey).getPublicKey();
+  const publisherId = `publisher.${node.rootAccountId}`;
+  const factoryId = `factory.${node.rootAccountId}`;
+  const vaultWasm = readFileSync(options.vaultWasmPath ?? VAULT_WASM);
+  const codeHash = codeHashOf(vaultWasm);
+
+  await root.createAccount({ newAccountId: publisherId, publicKey: rootPk, nearToTransfer: nearToYocto('60') });
+  await new Account(publisherId, provider, node.rootSecretKey).signAndSendTransaction({
+    receiverId: publisherId,
+    actions: [actions.deployGlobalContract(vaultWasm, 'codeHash')],
+  });
+  log(`published the vault code (${vaultWasm.length} bytes) as a global contract by hash ${codeHash} from ${publisherId}`);
+
+  await root.signAndSendTransaction({
+    receiverId: factoryId,
+    actions: [
+      actions.createAccount(),
+      actions.transfer(nearToYocto('10')),
+      actions.addFullAccessKey(rootPk),
+      actions.deployContract(readFileSync(options.factoryWasmPath ?? FACTORY_WASM)),
+      actions.functionCall('new', { owner_id: options.ownerId ?? node.rootAccountId, vault_code_hash: codeHash }, teraToGas('30'), 0n),
+    ],
+  });
+  log(`deployed the factory on ${factoryId} (new vaults run ${codeHash})`);
+  return { factoryId, publisherId, codeHash };
+}
+

@@ -2,8 +2,9 @@
  * `allowance` command-line interface.
  *
  * The agent key comes from `--key-file <path>` (given explicitly) or the
- * ALLOWANCE_AGENT_KEY environment variable; owner commands use
- * `--owner-key-file` or ALLOWANCE_OWNER_KEY. The CLI never writes keys.
+ * ALLOWANCE_AGENT_KEY environment variable; owner commands (and `factory
+ * create`, signed by the future owner) use `--owner-key-file` or
+ * ALLOWANCE_OWNER_KEY. The CLI never writes keys.
  */
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,14 +13,16 @@ import { parseArgs } from 'node:util';
 import { guardedPay, logPayResult, logSimulation } from './agent/guarded-pay.ts';
 import { formatAmount, isNear, parseAsset, parseAssetAmount, tokenDisplay, tokenOf } from './asset.ts';
 import { AllowanceClient } from './client.ts';
-import { describeAgent, describePolicy, describeRejection, describeStatus, iso } from './describe.ts';
+import { describeAgent, describePolicy, describeRejection, describeStatus, iso, shortKey } from './describe.ts';
 import { AllowanceError } from './errors.ts';
 import { table } from './format.ts';
+import { FactoryClient } from './factory.ts';
 import { requestHash } from './hash.ts';
 import { AGENT_KEY_ENV, OWNER_KEY_ENV, loadKey } from './keys.ts';
 import { OwnerClient } from './owner.ts';
+import { parseDuration } from './policy.ts';
 import type { AgentId, Asset, Receipt } from './types.ts';
-import { near } from './units.ts';
+import { near, parseAmount } from './units.ts';
 
 export interface CliIo {
   out: (line: string) => void;
@@ -47,6 +50,14 @@ Read-only (no key needed)
 Owner / approver (--owner <account>, key: --owner-key-file <path> or $${OWNER_KEY_ENV})
   approve <pending id>    deny <pending id>    kill
 
+Factory (--factory <account> or $ALLOWANCE_FACTORY; vaults on one global contract)
+  factory create --name <label> --owner <account> [--approver <account>] [--deposit <NEAR>]
+                 [--approval-ttl <1d>] [--key-gas-allowance <NEAR>] [--signer <account>]
+                                                 create <label>.<factory>; signed by --signer (default
+                                                 --owner) with --owner-key-file or $${OWNER_KEY_ENV}
+  factory list [--from <index>] [--limit <n>]    vaults the factory created
+  factory info                                   factory owner, vault code hash, minimum deposit
+
 Common options
   --vault <account>   vault contract account   ($ALLOWANCE_VAULT)
   --rpc <url>         NEAR JSON-RPC endpoint    ($ALLOWANCE_RPC_URL)
@@ -63,6 +74,13 @@ const OPTIONS = {
   'owner-key-file': { type: 'string' },
   owner: { type: 'string' },
   agent: { type: 'string' },
+  factory: { type: 'string' },
+  name: { type: 'string' },
+  signer: { type: 'string' },
+  approver: { type: 'string' },
+  deposit: { type: 'string' },
+  'approval-ttl': { type: 'string' },
+  'key-gas-allowance': { type: 'string' },
   payee: { type: 'string' },
   amount: { type: 'string' },
   asset: { type: 'string' },
@@ -119,6 +137,8 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
         return await decide(command, rest[0], values, io);
       case 'kill':
         return await kill(values, io);
+      case 'factory':
+        return await factory(rest[0], values, io);
       default:
         io.err(`unknown command ${JSON.stringify(command)}\n\n${USAGE}`);
         return EXIT.error;
@@ -395,3 +415,85 @@ async function kill(values: Values, io: CliIo): Promise<number> {
   return EXIT.ok;
 }
 
+// ----------------------------------------------------------------------
+// Factory
+// ----------------------------------------------------------------------
+
+function factoryTarget(values: Values, io: CliIo): { factoryId: string; rpcUrl: string } {
+  return {
+    factoryId: required(values.factory ?? io.env['ALLOWANCE_FACTORY'], '--factory (or $ALLOWANCE_FACTORY)'),
+    rpcUrl: required(values.rpc ?? io.env['ALLOWANCE_RPC_URL'], '--rpc (or $ALLOWANCE_RPC_URL)'),
+  };
+}
+
+async function factory(sub: string | undefined, values: Values, io: CliIo): Promise<number> {
+  switch (sub) {
+    case 'create':
+      return factoryCreate(values, io);
+    case 'list':
+      return factoryList(values, io);
+    case 'info':
+      return factoryInfo(values, io);
+    default:
+      io.err(`unknown factory command ${JSON.stringify(sub ?? '')}: use create, list or info\n\n${USAGE}`);
+      return EXIT.error;
+  }
+}
+
+async function factoryCreate(values: Values, io: CliIo): Promise<number> {
+  const { factoryId, rpcUrl } = factoryTarget(values, io);
+  const name = required(values.name, '--name');
+  const ownerId = values.owner ?? io.env['ALLOWANCE_OWNER'];
+  const signerId = required(values.signer ?? ownerId, '--owner or --signer (or $ALLOWANCE_OWNER)');
+  const key = loadKey({ keyFile: values['owner-key-file'], envVar: OWNER_KEY_ENV, env: io.env });
+  for (const w of key.warnings) io.err(`warning: ${w}`);
+  const client = new FactoryClient({ factoryId, rpcUrl, signerId, signerKey: key.secretKey });
+  const res = await client.createVault({
+    name,
+    ...(ownerId ? { ownerId } : {}),
+    ...(values.approver ? { approverId: values.approver } : {}),
+    ...(values.deposit ? { deposit: parseAmount(values.deposit) } : {}),
+    ...(values['approval-ttl'] ? { approvalTtlNs: parseDuration(values['approval-ttl']) } : {}),
+    ...(values['key-gas-allowance'] ? { keyGasAllowance: parseAmount(values['key-gas-allowance']) } : {}),
+  });
+  print(io, values, res, () =>
+    res.created
+      ? [
+          `created vault ${res.vaultId}: owner ${res.ownerId}, balance ${near(res.deposit)}, code ${res.codeHash ?? '?'} (global contract) (tx ${res.txHash})`,
+          `  it has no access key: ${res.ownerId} manages it (deposit, add_agent, approve, kill); agent keys are added by the vault itself`,
+          `  npx allowance ledger --vault ${res.vaultId} --rpc ${rpcUrl}`,
+        ].join('\n')
+      : `vault ${res.vaultId} was NOT created; the factory refunded ${near(res.deposit)} to ${signerId} (tx ${res.txHash})`,
+  );
+  return res.created ? EXIT.ok : EXIT.error;
+}
+
+async function factoryList(values: Values, io: CliIo): Promise<number> {
+  const client = new FactoryClient(factoryTarget(values, io));
+  const list = await client.vaults({
+    ...(values.from !== undefined ? { fromIndex: intOf(values.from, '--from') } : {}),
+    ...(values.limit !== undefined ? { limit: intOf(values.limit, '--limit') } : {}),
+  });
+  print(io, values, list, () =>
+    list.length
+      ? table(
+          ['vault', 'owner', 'created by', 'created at', 'code'],
+          list.map((v) => [v.vault_id, v.owner_id, v.created_by, iso(v.created_at_ns), shortKey(v.code_hash)]),
+        )
+      : 'no vaults yet',
+  );
+  return EXIT.ok;
+}
+
+async function factoryInfo(values: Values, io: CliIo): Promise<number> {
+  const { factoryId, rpcUrl } = factoryTarget(values, io);
+  const info = await new FactoryClient({ factoryId, rpcUrl }).info();
+  print(io, values, info, () =>
+    [
+      `factory ${factoryId}  owner ${info.owner_id}  vaults ${info.vaults}`,
+      `vault code (global contract by hash, immutable): ${info.vault_code_hash}`,
+      `minimum deposit per vault: ${near(info.min_deposit)}`,
+    ].join('\n'),
+  );
+  return EXIT.ok;
+}

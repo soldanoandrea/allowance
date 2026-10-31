@@ -1,5 +1,18 @@
 export { AllowanceClient, sleep, type AllowanceClientOptions, type PayRequest, type PayResult, type TxInfo, type WaitOptions } from './client.ts';
 export { OwnerClient, type OwnerClientOptions, type OwnerTx } from './owner.ts';
+export {
+  FactoryClient,
+  CREATE_VAULT_GAS,
+  isVaultName,
+  parseFactoryEvents,
+  type FactoryClientOptions,
+  type FactoryEvent,
+  type FactoryInfo,
+  type FactoryVault,
+  type FactoryVaultRecord,
+  type CreateVaultRequest,
+  type CreateVaultResult,
+} from './factory.ts';
 export { NearTransport, DEFAULT_GAS, FT_PAY_GAS, type VaultTransport, type CallResult, type CallOptions, type Finality } from './transport.ts';
 export {
   NEAR,

@@ -195,8 +195,9 @@ await vault.pay({ payee: 'api.you.testnet', amount: 2_000_000n, asset: { ft: 'us
 `AllowanceClient` also has `ping`, `receipts` (paged), `receipt`, `vault`,
 `agents`, `pending`, `token`, `waitForSettlement`; `OwnerClient` has
 `deposit`, `addAgent`, `setPolicy`, `approve`, `deny`, `pause`, `kill`,
-`registerToken`, `withdrawFt`, `setSplit`; `ReceiptVerifier` is the payee
-side; `runPaidTask` is the 402 loop with a pluggable planner and an optional
+`registerToken`, `withdrawFt`, `setSplit`; `FactoryClient` has
+`createVault`, `vaults`, `vault`, `info` (see [Vault factory](#vault-factory-factory));
+`ReceiptVerifier` is the payee side; `runPaidTask` is the 402 loop with a pluggable planner and an optional
 `precheck` (the risk service). Errors carry a stable `code`
 (`access_key_not_found`, `method_not_allowed`, `not_enough_allowance`,
 `contract_panic`, `config`, `rpc`).
@@ -211,6 +212,8 @@ npx allowance receipts                  # table of receipts
 npx allowance ledger                    # vault, tokens, split, agents + policy, pending approvals, recent receipts, ledger page URL
 npx allowance verify --receipt 7 --payee api.x --amount 0.02 --nonce <nonce>
 npx allowance approve 0 --owner you.testnet --owner-key-file owner.json     # also: deny <id>, kill
+npx allowance factory create --factory f.x --name bot --owner you.testnet --deposit 1 --owner-key-file owner.json
+npx allowance factory list --factory f.x                                    # also: factory info
 npx allowance-risk api.x --rpc <url> --vault vault.x                        # counterparty check, exit 0 allow / 2 warn / 3 block
 ```
 
@@ -442,6 +445,34 @@ which the SDK's receipt verifier accepts. A failed creation refunds the
 caller. Tested on neard-sandbox (`tests/factory.rs`: two vaults, payments
 from each, isolation of keys, owners, budgets, receipts and kill switch).
 
+From TypeScript (`sdk/src/factory.ts`) and the CLI:
+
+```ts
+import { FactoryClient, OwnerClient, buildPolicy, parseNear } from '@allowance/sdk';
+
+const factory = new FactoryClient({ factoryId: 'factory.x', rpcUrl, signerId: 'you.testnet', signerKey: ownerKey });
+const v = await factory.createVault({ name: 'bot', deposit: parseNear('1') });   // owner = signer unless ownerId; also approverId, approvalTtlNs, keyGasAllowance
+// v: {vaultId: 'bot.factory.x', created: true, ownerId, codeHash, txHash, events}; created: false = the factory refunded the deposit
+const owner = new OwnerClient({ vaultId: v.vaultId, ownerId: 'you.testnet', rpcUrl, ownerKey });
+await owner.deposit(parseNear('5'));
+await owner.addAgent({ key: agentPublicKey }, 'worker', buildPolicy({ perTxCap: '1', allow: ['api.x'] }));
+await factory.vaults();                                                          // [{vault_id, owner_id, code_hash, created_by, created_at_ns}]
+```
+
+```sh
+npx allowance factory create --factory factory.x --name bot --owner you.testnet [--approver dao.x] \
+    [--deposit 1] [--approval-ttl 1d] [--key-gas-allowance 0.5] [--signer platform.x] --owner-key-file owner.json
+npx allowance factory list --factory factory.x [--from 0] [--limit 50]
+npx allowance factory info --factory factory.x     # owner, vault code hash, minimum deposit, number of vaults
+```
+
+The name, accounts and deposit (at least the factory's `min_deposit`, read
+from `get_info`) are checked before anything is signed. The sandbox
+end-to-end test (`sdk/test/e2e.sandbox.test.ts`) publishes the vault code as a
+global contract, deploys the factory, creates a vault with `FactoryClient`,
+funds it, adds an agent key, pays, and has the payee verify the receipt by the
+global code hash.
+
 ## Security notes and limits
 
 * The owner is `owner_id`, checked on `predecessor_account_id`, never
@@ -466,8 +497,8 @@ from each, isolation of keys, owners, budgets, receipts and kill switch).
 * The counterparty-risk service is advisory and off-chain; the contract's
   policy is the enforcement point.
 * Not in this version: Sputnik DAO approver tests, Agent Market hiring, NEAR
-  Intents, owner web UI with wallet, NEP-413 relayer, TEE proofs, a
-  TypeScript client for the factory, `ft_transfer_call` payments.
+  Intents, owner web UI with wallet, NEP-413 relayer, TEE proofs,
+  `ft_transfer_call` payments.
 
 ## MVP vs stretch
 
@@ -484,7 +515,7 @@ from each, isolation of keys, owners, budgets, receipts and kill switch).
 | stretch | NEP-141 / USDC-style payments with storage check and payee registration | done (8 unit, 1 sandbox, demo scenario) |
 | stretch | Counterparty-risk service (age, code change, prior receipts, deny-list) | done (`risk/`, 16 tests, in the agent loop and the attack demo) |
 | stretch | Revenue split on income + vault-to-vault payments | done (7 unit, 1 sandbox, demo step) |
-| stretch | Vault factory on a global contract | done (5 unit, 1 sandbox test; testnet/mainnet publishing is the documented plan) |
+| stretch | Vault factory on a global contract | done (5 unit, 1 sandbox test; TypeScript `FactoryClient` + `allowance factory` CLI, 10 unit tests, 1 sandbox end-to-end test; testnet/mainnet publishing is the documented plan) |
 | stretch | Sputnik DAO approver, Agent Market, NEAR Intents, owner web UI, NEP-413 relayer, TEE proofs | not started |
 
 ## How the tracks' criteria are met
@@ -538,7 +569,7 @@ Prompts from [near-hackathon-prompt-examples](https://github.com/nearai/near-hac
 |---|---|
 | `cargo test` | vault: 60 unit tests (policy core, NEP-141 flows, split, contract on a mocked VM with mocked promise results) + 9 sandbox tests (`tests/sandbox.rs`: function-call key flows, NEP-141 with a real token, revenue split and vault-to-vault payments) + 1 factory sandbox test (`tests/factory.rs`) |
 | `cargo test --workspace` | the above + 5 factory unit tests (what `make test` and CI run) |
-| `npm test` | 119 vitest tests: SDK, CLI, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
+| `npm test` | 131 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
 | `npm run typecheck` | `tsc` strict over SDK, CLI, examples, demo API, risk service, testnet scripts, demo orchestrator and tests |
 | `make demo` | the whole story on a sandbox with eleven on-chain checks; non-zero exit if one fails |
 
@@ -554,7 +585,7 @@ factory/             the vault factory (global contract by hash), second crate o
 tests/sandbox.rs     vault end-to-end tests on neard-sandbox (near-sandbox + near-api)
 tests/factory.rs     factory end-to-end test (global contract, two isolated vaults)
 tests/fixtures/test-token/  NEP-141 test token (near-contract-standards) for the tests and the demo
-sdk/src/             AllowanceClient, OwnerClient, ReceiptVerifier, assets, 402 protocol, planners, CLI
+sdk/src/             AllowanceClient, OwnerClient, FactoryClient, ReceiptVerifier, assets, 402 protocol, planners, CLI
 sdk/bin/allowance.ts CLI entry point (`npx allowance`)
 sdk/examples/        agent-loop.ts (feature 5), attack.ts (feature 7)
 sdk/test/            vitest: unit tests with a mocked RPC + e2e.sandbox.test.ts

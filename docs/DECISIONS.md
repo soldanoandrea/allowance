@@ -315,8 +315,8 @@ design says.
 63. The factory is a second crate in the cargo workspace (vault, factory,
     test token); `cargo test` runs the vault's unit and sandbox tests plus
     the factory sandbox test (`tests/factory.rs`), `cargo test --workspace`
-    (what `make test` and CI run) adds the factory's unit tests. No
-    TypeScript client for the factory yet: the testnet scripts deploy a
+    (what `make test` and CI run) adds the factory's unit tests. The
+    TypeScript client came later (76); the testnet scripts still deploy a
     vault directly.
 
 ### Revenue split (`src/split.rs`)
@@ -388,3 +388,20 @@ design says.
     earlier project be separable (tags `pre-hackathon` /
     `hackathon-submission`, a README section linking the diff). The
     decision is the owner's; docs/SUBMISSION.md lists it in the checklist.
+
+## Polishing for the submission (2026-10-31)
+
+76. **`FactoryClient` and `allowance factory create|list|info`.** The
+    client reuses `NearTransport` with the factory as the contract and the
+    creator's account as the signer (the owner by default; `--signer` lets a
+    platform create a vault for someone else). It validates the vault name
+    with the factory's own rule, the account ids and the deposit against
+    `get_info().min_deposit` before signing, and returns `created: false`
+    (the factory refunded the deposit) as a value, like a policy rejection,
+    rather than throwing. Factory events have their own NEP-297 standard
+    (`allowance_factory`), so they are parsed by `parseFactoryEvents`, not
+    the vault's `parseEvents`. The sandbox end-to-end test now starts one
+    node for two scenarios (the existing vault story and the factory story)
+    instead of a second node, to keep the run short and avoid two
+    neard-sandbox processes competing in CI.
+
