@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-sandbox fmt clippy clean size \
+.PHONY: build test test-unit test-sandbox fmt fmt-check clippy clean size \
         sandbox-node node-check demo demo-keep attack-log test-ts typecheck check \
         demo-testnet demo-manual video
 
@@ -33,11 +33,14 @@ test-sandbox:
 fmt:
 	cargo fmt --all
 
+fmt-check:
+	cargo fmt --all --check
+
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
 size: build
-	@ls -l target/near/allowance.wasm target/near/allowance_factory/allowance_factory.wasm | awk '{printf "%s: %d bytes (%.1f KB)\n", $$9, $$5, $$5/1024}'
+	@ls -l target/near/allowance.wasm target/near/allowance_factory/allowance_factory.wasm | awk '{printf "%s: %d bytes (%.1f KB)\n", $$9, $$5, $$5/1000}'
 
 clean:
 	cargo clean
@@ -100,4 +103,4 @@ test-ts: typecheck
 	npm test
 
 # What CI runs.
-check: test build sandbox-node test-ts demo
+check: fmt-check test build sandbox-node test-ts demo
