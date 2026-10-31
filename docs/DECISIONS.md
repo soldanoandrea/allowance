@@ -382,12 +382,12 @@ design says.
     approve the waiting payment with the printed CLI command, for the video;
     with `--keep`/`--manual-approve` the sandbox owner key (the genesis key,
     a public constant) is written to the ignored `.tmp/` for the CLI.
-75. **Submission timing (open question for the human)**: the repository's
-    commits are dated 2026-10-30/31, before the hackathon window
-    (2026-11-01 to 2026-11-14). HACKATHON.md asks that work building on an
-    earlier project be separable (tags `pre-hackathon` /
-    `hackathon-submission`, a README section linking the diff). The
-    decision is the owner's; docs/SUBMISSION.md lists it in the checklist.
+75. **Submission timing (resolved)**: the repository's commits are dated
+    2026-10-30/31, before the submission window (2026-11-01 to
+    2026-11-14) but after the 2026-10-19 announcement. HACKATHON.md Q-001
+    counts code written from the announcement onward, so there is no
+    baseline to separate and no `pre-hackathon` tag: the README's
+    "Timeline" section states it, with the command to check the dates.
 
 ## Polishing for the submission (2026-10-31)
 

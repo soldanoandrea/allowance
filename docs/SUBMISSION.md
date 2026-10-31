@@ -51,13 +51,17 @@ Vault" open.
 ## Before sending: checklist for the human
 
 - [ ] Submission window: 2026-11-01T00:00:00Z to 2026-11-14T23:59:00Z (00:59 CET on Nov 15).
-- [ ] **Timeline disclosure.** HACKATHON.md Q-001: code written from the
+- [x] **Timeline disclosure.** HACKATHON.md Q-001: code written from the
       2026-10-19 announcement onward counts; only commits before that date are
       baseline. Every commit in this repository is dated 2026-10-30 or later,
-      so all of it is eligible. State this in the README (a short "Timeline"
-      section: first commit date, built entirely after the announcement, no
-      pre-existing code) rather than tagging a `pre-hackathon` state.
+      so all of it is eligible. Done: README "Timeline" section (first commit
+      date, built entirely after the announcement, no pre-existing code), no
+      `pre-hackathon` tag.
 - [ ] If you submit another project too, each README must name the other (max two).
+      This README names **near-thesis** (track `thesis`) in "Other submission
+      by the same team": replace `<REPOSITORY LINK: added before submission>`
+      with its public URL, and make sure near-thesis's README names Allowance
+      back.
 - [ ] Repository public, README "do X, see Y" steps work on a clean machine (`make demo`), LICENSE present (MIT).
 - [ ] X post published by you: says the project was built at NEAR HACKATHON, tags @NEARProtocol and #NEARHackathon, has the video.
 - [ ] Any hosted demo (ledger page on GitHub Pages, testnet vault) stays up until at least 2026-11-18, ideally 2026-11-25.

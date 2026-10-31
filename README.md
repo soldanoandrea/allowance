@@ -115,6 +115,17 @@ mainnet. The same story on testnet, with your own accounts, is prepared in
 [docs/TESTNET.md](docs/TESTNET.md) (`make demo-testnet`, a dry run unless you
 confirm).
 
+## Judging map
+
+| Criterion | Where it is demonstrated | Check it with |
+|---|---|---|
+| Runs and does what this README says | one command builds, starts a throw-away chain and plays the whole story with eleven on-chain checks (non-zero exit if one fails); a fresh clone following only this README is recorded in [docs/FRESH_CLONE_CHECK.md](docs/FRESH_CLONE_CHECK.md) | `make demo` |
+| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 75 Rust tests (65 unit, 10 on neard-sandbox) and 131 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
+| Design | two independent layers: the protocol scopes the agent key (methods, gas, no deposits), the contract checks the money; free `simulate` before every payment; receipts a payee verifies with one view, no facilitator ([docs/PAYMENT_FLOW.md](docs/PAYMENT_FLOW.md)); every trade-off written down in [docs/DECISIONS.md](docs/DECISIONS.md); a static ledger page with no build | `npx allowance ledger`, [ledger/](ledger/) |
+| Impact | an agent that pays for APIs, data or other agents with bounded loss: the prompt-injection attack in [docs/attack-log.md](docs/attack-log.md) moves no money; stablecoin prices; income, revenue split and vault-to-vault payments for agent businesses; ~0.003 NEAR of storage per vault through the factory | `make demo` (steps 4-6), [demo video](docs/media/demo.mp4) |
+| Originality | the agent is a function-call key **on the vault account itself**: no agent account, no faucet, no custodian, and the kill switch is `DeleteKey` at protocol level; x402-style receipts bound to the request hash; counterparty risk from public chain data (account age, code changes, history in this vault) | [How a payment flows](#how-a-payment-flows), `risk/` |
+| Sustainability | MIT; CI on every push ([.github/workflows/test.yml](.github/workflows/test.yml)); TypeScript runs without a build step, dependencies pinned with one lockfile; immutable vault code by hash for every factory vault; ledger page deployable to GitHub Pages ([.github/workflows/pages.yml](.github/workflows/pages.yml)); the testnet run is scripted and dry-run by default ([docs/TESTNET.md](docs/TESTNET.md)) | `make test`, `npm test` |
+
 ## Architecture
 
 ```
@@ -598,22 +609,49 @@ docs/                DECISIONS.md, PAYMENT_FLOW.md, attack-log.md, TESTNET.md, D
 DESIGN.md            product spec
 ```
 
+## Timeline
+
+NEAR HACKATHON was announced on 2026-10-19. Per HACKATHON.md Q-001, code
+written from the announcement onward counts; only commits before it would be
+a baseline. This repository has no such baseline: **every commit is dated
+2026-10-30 or later** (the first one, the vault contract, on 2026-10-30), it
+was built entirely after the announcement, and it contains no pre-existing
+code; the only code not written for this project is the public libraries
+listed under [Disclosure](#disclosure). Check it with
+`git log --reverse --format='%ad %s' --date=short | head -3`.
+
+## Other submission by the same team
+
+**near-thesis**: a reproducible, data-backed investment thesis on NEAR (track
+`thesis`). Repository: `<REPOSITORY LINK: added before submission>`.
+
 ## Disclosure
 
-**AI-generated code**: all code and documentation in this repository were
-written by AI coding agents (Claude, by Anthropic, working in Claude Code)
-from `DESIGN.md`, and reviewed and run by the human owner of the project.
+**AI-generated code**: all code, tests and documentation in this repository,
+the video script `docs/demo.tape` and the video rendered from it
+(`docs/media/`), were written by AI coding agents, Claude models by Anthropic
+(Claude Fable 5.1 and Claude Opus 5.5) working in Claude Code, from the
+product spec in `DESIGN.md`, and reviewed and run by the human owner of the
+project. Commits written by an agent carry a `Co-Authored-By: Claude ...`
+trailer. At run time the agent loop can optionally ask an LLM (NEAR AI Cloud,
+`--planner llm`) to choose pay / counteroffer / refuse; `make demo` and the
+tests use the deterministic scripted planner.
 
 **Third-party libraries and services**
 
 | Where | Library / service | Version | License |
 |---|---|---|---|
-| contract, factory | `near-sdk` | 5.30 | MIT / Apache-2.0 |
-| test token (tests and demo only) | `near-contract-standards` | 5.30 | MIT / Apache-2.0 |
-| contract tests, sandbox host | `near-sandbox`, `near-api`, `cargo-near-build`, `tokio`, `testresult`, `reqwest` | 0.4, 0.8, 0.11, 1, 0.4, 0.12 | MIT / Apache-2.0 |
-| SDK, CLI, demo API, risk service, scripts | `near-api-js` (and its dependencies: `@noble/curves`, `@noble/hashes`, `@scure/base`, `borsh`, ...) | 7.4.0 | MIT / Apache-2.0 |
+| contract, factory | `near-sdk` | 5.30.0 | MIT OR Apache-2.0 |
+| test token (tests and demo only) | `near-contract-standards` | 5.30.0 | MIT OR Apache-2.0 |
+| contract tests, sandbox host | `near-sandbox`, `near-api`, `cargo-near-build`, `testresult`, `reqwest` | 0.4.0, 0.8.7, 0.11.5, 0.4.2, 0.12.28 | MIT OR Apache-2.0 |
+| contract tests, sandbox host | `tokio` | 1.54.1 | MIT |
+| SDK, CLI, demo API, risk service, scripts | `near-api-js` | 7.4.0 | MIT AND Apache-2.0 |
+| (installed with `near-api-js`) | about 60 transitive packages, e.g. `@noble/curves`, `@noble/hashes`, `@scure/base` 2.2.0, `borsh` 2.0.0, `tweetnacl` 1.0.3, `bip39` 3.0.2 | per `package-lock.json` | MIT, ISC, Apache-2.0, BSD-3-Clause, Unlicense |
 | dev tooling | `typescript`, `vitest`, `@types/node` | 6.0.3, 4.1.12, 24.19.2 | Apache-2.0, MIT, MIT |
-| runtime binaries | `neard-sandbox` (nearcore), downloaded by `near-sandbox` | 2.14.0 | MIT / Apache-2.0 |
+| build tooling | `cargo-near` (installed by the Quickstart), Rust stable | 0.22.0, >= 1.95 | MIT OR Apache-2.0 |
+| runtime binaries | `neard-sandbox` (nearcore), downloaded by `near-sandbox` | 2.14.0 | MIT OR Apache-2.0 |
+| CI and hosting | GitHub Actions `actions/checkout`, `actions/setup-node`, `actions/configure-pages`, `actions/upload-pages-artifact`, `actions/deploy-pages` | v4, v4, v5, v3, v4 | MIT |
+| demo video only (not needed to run anything) | VHS (with ttyd and ffmpeg) | 0.12.1 | MIT (ffmpeg: LGPL/GPL) |
 | optional services | NEAR AI Cloud (LLM planner), FastNear transactions API (risk check), public NEAR RPC | - | used over HTTP, no SDK |
 
 The ledger page uses no third-party code.
