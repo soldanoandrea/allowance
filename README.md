@@ -650,7 +650,7 @@ listed under [Disclosure](#disclosure). Check it with
 ## Other submission by the same team
 
 **near-thesis**: a reproducible, data-backed investment thesis on NEAR (track
-`thesis`). Repository: `<REPOSITORY LINK: added before submission>`.
+`thesis`). Repository: https://github.com/soldanoandrea/near-thesis
 
 ## Disclosure
 
