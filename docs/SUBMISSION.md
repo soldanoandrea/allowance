@@ -58,10 +58,12 @@ Vault" open.
       date, built entirely after the announcement, no pre-existing code), no
       `pre-hackathon` tag.
 - [ ] If you submit another project too, each README must name the other (max two).
-      This README names **near-thesis** (track `thesis`) in "Other submission
-      by the same team": replace `<REPOSITORY LINK: added before submission>`
-      with its public URL, and make sure near-thesis's README names Allowance
-      back.
+      Done in both directions as of 2026-10-31: this README names
+      **near-thesis** (https://github.com/soldanoandrea/near-thesis, track
+      `thesis`) and near-thesis's README names Allowance
+      (https://github.com/soldanoandrea/allowance). Left: both repositories
+      public under exactly these URLs (and `repository` in Cargo.toml, which is
+      embedded in the wasm as NEP-330 metadata, set to the same URL).
 - [ ] Repository public, README "do X, see Y" steps work on a clean machine (`make demo`), LICENSE present (MIT).
       A fresh clone following only the README passed on 2026-10-31
       ([FRESH_CLONE_CHECK.md](FRESH_CLONE_CHECK.md); toolchain preinstalled).

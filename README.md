@@ -32,6 +32,11 @@ editing): [docs/media/demo.mp4](docs/media/demo.mp4). Regenerate it with
 `make video` ([docs/demo.tape](docs/demo.tape), scene by scene from
 [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)).
 
+**Judging in five minutes**: run `make demo` (expect eleven `ok` checks and
+`demo OK`), then [try the attack yourself](#try-the-attack-yourself);
+read the real attack transcript in [docs/attack-log.md](docs/attack-log.md);
+the [judging map](#judging-map) says where each criterion is met.
+
 ![Allowance demo: owner policy, an agent paying a 402 API, one counteroffer, a human approval, a stablecoin payment, a prompt-injection attack that moves no money, a revenue split, the kill switch](docs/media/demo.gif)
 
 ## Quickstart (local, nothing to sign up for)
@@ -48,7 +53,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/release
 make demo         # build, start a local sandbox, run the whole story, exit (first run: a few minutes of Rust compile + sandbox download; then about 30 s)
 make demo-keep    # same, then keep the chain and the API running and print the ledger URL and CLI commands
 make demo-manual  # like demo-keep, but YOU approve the payment that waits for a human (for recording the video)
-make check        # everything CI runs: cargo test --workspace, TypeScript type-check + tests, make demo
+make check        # everything CI runs: cargo fmt --check, cargo test --workspace, TypeScript type-check + tests, make demo
 make video        # optional: re-record docs/media/demo.mp4 + demo.gif with VHS (brew install vhs)
 ```
 
@@ -118,17 +123,38 @@ demo OK
 Keys: the sandbox's genesis key (a public constant of the `near-sandbox`
 crate) signs the owner's transactions; the agent keys are generated per run
 and written only to `examples/local_demo/.tmp/` (git-ignored, mode 600)
-because the agents run as their own processes. Nothing touches testnet or
+because the agents run as their own processes; `make demo-keep` and
+`make demo-manual` also write the owner's sandbox key there
+(`owner-key.json`) for the CLI. Nothing touches testnet or
 mainnet. The same story on testnet, with your own accounts, is prepared in
 [docs/TESTNET.md](docs/TESTNET.md) (`make demo-testnet`, a dry run unless you
 confirm).
+
+### Try the attack yourself
+
+Two minutes, after `make demo`. `make demo-keep` plays the same story, then
+leaves the chain and the paid API running (Ctrl+C stops them) and prints the
+ledger page URL. In a second terminal, in the repository, act as the
+compromised agent and then as the owner:
+
+```sh
+set -a; . examples/local_demo/.tmp/demo.env; set +a       # RPC, vault and owner of the running sandbox
+K=examples/local_demo/.tmp/agent-key.json; O=examples/local_demo/.tmp/owner-key.json
+npx allowance ledger                                                          # vault, both agents and their policies, 8 receipts
+npx allowance pay --payee attacker.sandbox --amount 0.1 --key-file $K          # REFUSED before signing (not on the allowlist), exit 3
+npx allowance pay --payee attacker.sandbox --amount 0.1 --force --key-file $K  # signed anyway: the contract writes a `rejected` receipt, exit 3
+npx allowance pay --payee api.sandbox --amount 0.55 --key-file $K             # above 0.5 NEAR: needs_approval, approval request #1, exit 2
+npx allowance approve 1 --owner owner.sandbox --owner-key-file $O             # the owner approves (use the id it printed): paid
+npx allowance kill --owner owner.sandbox --owner-key-file $O                  # paused, both agent keys deleted from the vault account
+npx allowance pay --payee api.sandbox --amount 0.01 --force --key-file $K     # error [access_key_not_found]: NEAR refuses the key itself
+```
 
 ## Judging map
 
 | Criterion | Where it is demonstrated | Check it with |
 |---|---|---|
 | Runs and does what this README says | one command builds, starts a throw-away chain and plays the whole story with eleven on-chain checks (non-zero exit if one fails); a fresh clone following only this README is recorded in [docs/FRESH_CLONE_CHECK.md](docs/FRESH_CLONE_CHECK.md) | `make demo` |
-| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 75 Rust tests (65 unit, 10 on neard-sandbox) and 132 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
+| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 75 Rust tests (65 unit, 10 on neard-sandbox) and 133 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
 | Design | two independent layers: the protocol scopes the agent key (methods, gas, no deposits), the contract checks the money; free `simulate` before every payment; receipts a payee verifies with one view, no facilitator ([docs/PAYMENT_FLOW.md](docs/PAYMENT_FLOW.md)); every trade-off written down in [docs/DECISIONS.md](docs/DECISIONS.md); a static ledger page with no build | `npx allowance ledger`, [ledger/](ledger/) |
 | Impact | an agent that pays for APIs, data or other agents with bounded loss: the prompt-injection attack in [docs/attack-log.md](docs/attack-log.md) moves no money; stablecoin prices; income, revenue split and vault-to-vault payments for agent businesses; ~0.003 NEAR of storage per vault through the factory | `make demo` (steps 4-6), [demo video](docs/media/demo.mp4) |
 | Originality | the agent is a function-call key **on the vault account itself**: no agent account, no faucet, no custodian, and the kill switch is `DeleteKey` at protocol level; x402-style receipts bound to the request hash; counterparty risk from public chain data (account age, code changes, history in this vault) | [How a payment flows](#how-a-payment-flows), `risk/` |
@@ -474,7 +500,7 @@ The vault wasm is published once as a NEAR **global contract by code hash**
 385 KB build on the sandbox). `create_vault(name, owner_id?, approver_id?, ...)`
 creates `<name>.<factory>` with one batch (`CreateAccount`, `Transfer`,
 `UseGlobalContract`, `new`); the new vault stores ~312 bytes (~0.003 NEAR of
-stake) instead of its own 3.6 NEAR copy of the code, has **no access key**
+stake) instead of its own ~3.9 NEAR copy of the code, has **no access key**
 (managed only by `owner_id`), and reports the code in `global_contract_hash`,
 which the SDK's receipt verifier accepts. A failed creation refunds the
 caller. Tested on neard-sandbox (`tests/factory.rs`: two vaults, payments
@@ -518,6 +544,18 @@ global code hash.
 * The key allowance is **gas only**: it caps what the agent can burn, not what
   it can spend. Spending limits are the policy. A key cannot attach deposits.
 * An exhausted gas allowance locks the agent, not the vault: `top_up_allowance`.
+* What a leaked key can still do until it is removed: burn its gas
+  allowance (default 1 NEAR) and use it to write `rejected` receipts and
+  approval requests. Neither moves money, but each rejected attempt costs the
+  vault gas plus the receipt's storage (about 0.002 NEAR together in the
+  attack demo; storage is reclaimable with `prune_receipts`), and open approval
+  requests per agent are not capped, so a flood of them lands in front of the
+  human. Mitigation today: a small `gas_allowance` per key, and `remove_agent` /
+  `kill` as soon as rejections appear.
+* Budget windows are fixed, epoch-aligned buckets (see [Policy](#policy)): an
+  agent that spends its whole budget just before a boundary can spend it again
+  just after, so the worst case over any rolling `period_ns` is twice the
+  budget. Use `per_tx_cap` and `cooldown_ns` to bound that burst.
 * `kill` and `remove_agent` are protocol-level: `DeleteKey` is executed by the
   vault itself in the same transaction.
 * Receipts are written only by the contract; agents can only append their
@@ -604,7 +642,7 @@ Prompts from [near-hackathon-prompt-examples](https://github.com/nearai/near-hac
 |---|---|
 | `cargo test` | vault: 60 unit tests (policy core, NEP-141 flows, split, contract on a mocked VM with mocked promise results) + 9 sandbox tests (`tests/sandbox.rs`: function-call key flows, NEP-141 with a real token, revenue split and vault-to-vault payments) + 1 factory sandbox test (`tests/factory.rs`) |
 | `cargo test --workspace` | the above + 5 factory unit tests (what `make test` and CI run) |
-| `npm test` | 132 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
+| `npm test` | 133 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
 | `npm run typecheck` | `tsc` strict over SDK, CLI, examples, demo API, risk service, testnet scripts, demo orchestrator and tests |
 | `make demo` | the whole story on a sandbox with eleven on-chain checks; non-zero exit if one fails |
 
