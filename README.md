@@ -27,7 +27,7 @@ split forwards a share of every incoming payment to beneficiaries, vaults
 pay each other through `deposit`, and a **factory** spins up vaults from one
 global contract for ~0.003 NEAR of storage each.
 
-**Demo video** (1:58, recorded by a script against a live local sandbox, no
+**Demo video** (1:58, 1920x1080, recorded by a script against a live local sandbox, no
 editing): [docs/media/demo.mp4](docs/media/demo.mp4). Regenerate it with
 `make video` ([docs/demo.tape](docs/demo.tape), scene by scene from
 [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)).

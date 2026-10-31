@@ -448,3 +448,15 @@ design says.
     one call away. Pausing the vault also counts against agents that keep
     paying; agents that use the SDK simulate first and never sign while
     paused.
+
+79. **The video is 1920x1080 and cuts nothing (2026-10-31, after review).**
+    The first render (1276x860, 16 px, about 124 columns) cut long lines
+    with `~`, and the cut hid the reasons in the attack scene. The tape now
+    renders at 1920x1080 (16:9, X's full HD) with a 20 px font, about 155
+    columns; `scene.ts` wraps a longer line at a word boundary onto indented
+    continuation lines, and the CLI's tables wrap a memo under its own
+    column instead of cutting it (piped output still cuts memos at 40
+    characters, to keep one line per receipt). The scenes no longer print
+    the demo's "=== N." step headers, whose numbers did not match the
+    captions. Result: 1:58, a 2.2 MB MP4 and a 2.5 MB GIF; checked by OCR on
+    a frame every 2 s (no line ends in `~`) and by eye on sampled frames.

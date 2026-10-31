@@ -5,7 +5,8 @@
 with VHS, shows each scene's real output with a caption in place of the
 voice-over, and types the owner's commands (ledger, approve, kill, the
 refused payment) for real. Output: [media/demo.mp4](media/demo.mp4) (1:58,
-H.264, about 1.5 MB, ready to attach to the X post) and
+1920x1080 H.264, about 2.2 MB, ready to attach to the X post; long lines
+wrap, none is cut) and
 [media/demo.gif](media/demo.gif). It is under 2:20, the longest video a
 standard (non-Premium) X account can post. The table below is the storyline
 for a narrated recording by a human.
