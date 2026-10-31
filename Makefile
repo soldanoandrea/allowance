@@ -1,6 +1,6 @@
 .PHONY: build test test-unit test-sandbox fmt clippy clean size \
         sandbox-node node-check demo demo-keep attack-log test-ts typecheck check \
-        demo-testnet demo-manual
+        demo-testnet demo-manual video
 
 # ----------------------------------------------------------------------
 # Contract (Rust)
@@ -80,6 +80,12 @@ demo-testnet: node-check build node_modules
 # waits for a human, with the CLI command the demo prints.
 demo-manual: node-check build sandbox-node node_modules
 	node examples/local_demo/run.ts --keep --manual-approve
+
+# Render the demo video (docs/demo.tape, docs/DEMO_SCRIPT.md) with VHS
+# against a live local sandbox: docs/media/demo.mp4 and docs/media/demo.gif.
+# Needs vhs, ttyd and ffmpeg (macOS: brew install vhs). Nothing is uploaded.
+video: node-check
+	scripts/video/render.sh
 
 # Re-run the demo and refresh docs/attack-log.md with the real output.
 attack-log: node-check build sandbox-node node_modules

@@ -28,6 +28,8 @@ export interface CliIo {
   out: (line: string) => void;
   err: (line: string) => void;
   env: Record<string, string | undefined>;
+  /** Terminal width, when output goes to a terminal: tables are fitted to it. */
+  columns?: number | undefined;
 }
 
 /** Exit codes: 0 ok, 1 error, 2 waiting for human approval, 3 refused / rejected by the policy. */
@@ -326,7 +328,7 @@ async function receipts(values: Values, io: CliIo): Promise<number> {
     ...(values.limit !== undefined ? { limit: intOf(values.limit, '--limit') } : {}),
   });
   await learnTokens(client, list.map((r) => r.asset));
-  print(io, values, list, () => (list.length ? table(RECEIPT_HEADERS, receiptRows(list)) : 'no receipts'));
+  print(io, values, list, () => (list.length ? table(RECEIPT_HEADERS, receiptRows(list), io.columns) : 'no receipts'));
   return EXIT.ok;
 }
 
@@ -367,7 +369,7 @@ async function ledger(values: Values, io: CliIo): Promise<number> {
     for (const p of pending) {
       out.push(`  #${p.id} receipt #${p.receipt_id}: ${formatAmount(p.amount, p.asset)} -> ${p.payee} "${p.memo}" (expires ${iso(p.expires_at_ns)})`);
     }
-    out.push('', 'recent receipts', recent.length ? table(RECEIPT_HEADERS, receiptRows(recent)) : 'no receipts');
+    out.push('', 'recent receipts', recent.length ? table(RECEIPT_HEADERS, receiptRows(recent), io.columns) : 'no receipts');
     out.push('', `ledger page: ${ledgerUrl(rpcUrl, vaultId)}`);
     return out.join('\n');
   });

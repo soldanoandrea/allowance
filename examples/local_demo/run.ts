@@ -80,6 +80,8 @@ const withFt = !values['no-ft'];
 
 const TMP = join(REPO_ROOT, 'examples', 'local_demo', '.tmp');
 const say = (line = ''): void => console.log(line ? `[demo] ${line}` : '');
+/** Paths in the output are relative to the repository root (where `make` runs): no local paths in logs. */
+const rel = (path: string): string => relative(REPO_ROOT, path);
 const step = (title: string): void => console.log(`\n=== ${title} ===`);
 
 const missing = sandboxPrerequisites() ?? (withFt ? tokenPrerequisites() : null);
@@ -192,12 +194,12 @@ try {
     return file;
   };
   const keyFile = writeKey('agent-key.json', demo.agentPublicKey, demo.agentSecretKey);
-  say(`agent key (sandbox only) -> ${keyFile}`);
+  say(`agent key (sandbox only) -> ${rel(keyFile)}`);
   const ownerKeyFile = join(TMP, 'owner-key.json');
   if (values.keep || values['manual-approve']) {
     writeFileSync(ownerKeyFile, JSON.stringify({ account_id: demo.ownerId, private_key: demo.ownerSecretKey }, null, 2), { mode: 0o600 });
     chmodSync(ownerKeyFile, 0o600);
-    say(`owner key (sandbox genesis key, sandbox only) -> ${ownerKeyFile}`);
+    say(`owner key (sandbox genesis key, sandbox only) -> ${rel(ownerKeyFile)}`);
   }
 
   let token: DemoToken | undefined;
@@ -219,7 +221,7 @@ try {
     });
     say(`token policy: cap 10 ${token.symbol}, budget 20 ${token.symbol} per day, payees [${demo.payeeId}], approval above 5 ${token.symbol}, may pay 0.01 NEAR to register a payee on the token`);
     usdKeyFile = writeKey('agent-usd-key.json', token.agentPublicKey, token.agentSecretKey);
-    say(`token agent key (sandbox only) -> ${usdKeyFile}`);
+    say(`token agent key (sandbox only) -> ${rel(usdKeyFile)}`);
   }
 
   step('3. paid demo API');
@@ -239,8 +241,8 @@ try {
       `ALLOWANCE_VAULT=${demo.vaultId}`,
       `ALLOWANCE_OWNER=${demo.ownerId}`,
       `DEMO_API_URL=${apiUrl}`,
-      ...(token ? [`# NEP-141 test token: ${token.tokenId} (${token.symbol}); token agent key: --key-file ${usdKeyFile}`] : []),
-      `# agent key: --key-file ${keyFile}`,
+      ...(token ? [`# NEP-141 test token: ${token.tokenId} (${token.symbol}); token agent key: --key-file ${rel(usdKeyFile)}`] : []),
+      `# agent key: --key-file ${rel(keyFile)}`,
       '',
     ].join('\n'),
   );
@@ -248,7 +250,7 @@ try {
   // Relative to the repo root (the children run there), so logs carry no local paths.
   // The attacker stands for an address on a shared scam list: the agents'
   // counterparty-risk check gets it as its deny-list.
-  const common = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, keyFile), '--deny', demo.attackerId];
+  const common = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', rel(keyFile), '--deny', demo.attackerId];
   const reader = new AllowanceClient({ vaultId: demo.vaultId, rpcUrl: node.rpcUrl });
   const owner = new OwnerClient({ vaultId: demo.vaultId, ownerId: demo.ownerId, rpcUrl: node.rpcUrl, ownerKey: demo.ownerSecretKey });
 
@@ -256,7 +258,7 @@ try {
   const manual = values['manual-approve'];
   if (manual) {
     say('YOU are the owner: when the agent waits for approval, run in another terminal');
-    say(`  npx allowance approve <request id> --vault ${demo.vaultId} --rpc ${node.rpcUrl} --owner ${demo.ownerId} --owner-key-file ${relative(REPO_ROOT, ownerKeyFile)}`);
+    say(`  npx allowance approve <request id> --vault ${demo.vaultId} --rpc ${node.rpcUrl} --owner ${demo.ownerId} --owner-key-file ${rel(ownerKeyFile)}`);
   }
   const stopApprover = manual ? async () => 1 : startOwnerApprover(owner, reader);
   const loop = await runNode('sdk/examples/agent-loop.ts', [...common, '--planner', values.planner ?? 'scripted', '--approval-timeout', manual ? '600' : '60']);
@@ -266,7 +268,7 @@ try {
   let payeeTokens = 0n;
   if (token) {
     step('4b. NEP-141: a second agent pays in a test stablecoin');
-    const usdArgs = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', relative(REPO_ROOT, usdKeyFile), '--deny', demo.attackerId];
+    const usdArgs = ['--vault', demo.vaultId, '--rpc', node.rpcUrl, '--api', apiUrl, '--key-file', rel(usdKeyFile), '--deny', demo.attackerId];
     ftLoop = await runNode('sdk/examples/agent-loop.ts', [...usdArgs, '--scenario', 'ft', '--planner', values.planner ?? 'scripted']);
     const tokenView = new NearTransport({ rpcUrl: node.rpcUrl, vaultId: token.tokenId });
     payeeTokens = BigInt(await tokenView.view<string>('ft_balance_of', { account_id: demo.payeeId }));
@@ -319,7 +321,12 @@ try {
     BigInt((await new JsonRpcProvider({ url: node.rpcUrl }).viewAccount({ accountId: providerId })).amount) - providerBefore;
 
   step('7. receipts on-chain');
-  await cli(['receipts', '--vault', demo.vaultId, '--rpc', node.rpcUrl], { out: console.log, err: console.error, env: {} });
+  await cli(['receipts', '--vault', demo.vaultId, '--rpc', node.rpcUrl], {
+    out: console.log,
+    err: console.error,
+    env: {},
+    columns: process.stdout.isTTY ? process.stdout.columns : undefined,
+  });
 
   console.log('\nchecks');
   const receipts = await reader.receipts();
@@ -372,11 +379,11 @@ try {
 
   if (values.keep) {
     console.log(`\nSandbox and API keep running. Try the CLI (agent key is sandbox-only):`);
-    console.log(`  set -a; . ${join(TMP, 'demo.env')}; set +a`);
+    console.log(`  set -a; . ${rel(join(TMP, 'demo.env'))}; set +a`);
     console.log(`  npx allowance ledger`);
-    console.log(`  npx allowance simulate --payee ${demo.payeeId} --amount 0.1 --key-file ${relative(REPO_ROOT, keyFile)}`);
-    console.log(`  npx allowance kill --owner ${demo.ownerId} --owner-key-file ${relative(REPO_ROOT, ownerKeyFile)}`);
-    console.log(`  npx allowance pay --payee ${demo.payeeId} --amount 0.01 --force --key-file ${relative(REPO_ROOT, keyFile)}    # after kill: access_key_not_found`);
+    console.log(`  npx allowance simulate --payee ${demo.payeeId} --amount 0.1 --key-file ${rel(keyFile)}`);
+    console.log(`  npx allowance kill --owner ${demo.ownerId} --owner-key-file ${rel(ownerKeyFile)}`);
+    console.log(`  npx allowance pay --payee ${demo.payeeId} --amount 0.01 --force --key-file ${rel(keyFile)}    # after kill: access_key_not_found`);
     console.log('Press Ctrl+C to stop.');
     await new Promise<never>(() => {});
   }
