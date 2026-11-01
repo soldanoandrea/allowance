@@ -32,7 +32,7 @@ editing): [docs/media/demo.mp4](docs/media/demo.mp4). Regenerate it with
 `make video` ([docs/demo.tape](docs/demo.tape), scene by scene from
 [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)).
 
-**Judging in five minutes**: run `make demo` (expect eleven `ok` checks and
+**Judging in five minutes**: run `make demo` (expect twelve `ok` checks and
 `demo OK`), then [try the attack yourself](#try-the-attack-yourself);
 read the real attack transcript in [docs/attack-log.md](docs/attack-log.md);
 the [judging map](#judging-map) says where each criterion is met.
@@ -96,7 +96,11 @@ and then, on that throw-away chain:
    `shop.sandbox` with a 10% / 5% revenue split; the agent pays it 0.1 NEAR
    vault-to-vault and the split forwards 0.01 / 0.005 NEAR in the same
    transaction;
-7. prints the receipts, eleven checks and the ledger page URL, and exits 0.
+7. **MCP** (`mcp/`): an MCP client, as Claude Desktop or Claude Code would,
+   starts `allowance-mcp` with only the agent key, reads its budget, buys one
+   more item (receipt #8) and, told to pay the attacker, is refused before
+   anything is signed;
+8. prints the receipts, twelve checks and the ledger page URL, and exits 0.
 
 Expected tail of the output (the real attack transcript is in
 [docs/attack-log.md](docs/attack-log.md)):
@@ -114,8 +118,8 @@ id  kind    status                      agent                   payee           
 
 checks
   ok   agent loop finished
-  ...  (eleven checks: autonomous payment, counteroffer, owner approval, attacker rejected and never paid,
-        protocol refusals, revenue split, risk check, NEP-141 payment with payee registration)
+  ...  (twelve checks: autonomous payment, counteroffer, owner approval, attacker rejected and never paid,
+        protocol refusals, revenue split, risk check, MCP payment and refusal, NEP-141 payment with payee registration)
 
 demo OK
 ```
@@ -153,8 +157,8 @@ npx allowance pay --payee api.sandbox --amount 0.01 --force --key-file $K     # 
 
 | Criterion | Where it is demonstrated | Check it with |
 |---|---|---|
-| Runs and does what this README says | one command builds, starts a throw-away chain and plays the whole story with eleven on-chain checks (non-zero exit if one fails); a fresh clone following only this README is recorded in [docs/FRESH_CLONE_CHECK.md](docs/FRESH_CLONE_CHECK.md) | `make demo` |
-| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); 83 Rust tests (72 unit, 11 on neard-sandbox) and 133 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
+| Runs and does what this README says | one command builds, starts a throw-away chain and plays the whole story with twelve on-chain checks (non-zero exit if one fails); a fresh clone following only this README is recorded in [docs/FRESH_CLONE_CHECK.md](docs/FRESH_CLONE_CHECK.md) | `make demo` |
+| Technical implementation | Rust vault: pure, deterministic policy core (`src/policy.rs`), receipts and NEP-297 events, approval queue, NEP-141 payment chain with payee storage registration and callbacks that cannot strand a receipt (`src/lib.rs`), revenue split (`src/split.rs`); factory on a NEP-591 global contract (`factory/`); TypeScript SDK, CLI and factory client on near-api-js (`sdk/`); MCP server on the official MCP SDK (`mcp/`); 83 Rust tests (72 unit, 11 on neard-sandbox) and 142 TypeScript tests (one end-to-end run on neard-sandbox) | `make check` |
 | Design | two independent layers: the protocol scopes the agent key (methods, gas, no deposits), the contract checks the money; free `simulate` before every payment; receipts a payee verifies with one view, no facilitator ([docs/PAYMENT_FLOW.md](docs/PAYMENT_FLOW.md)); every trade-off written down in [docs/DECISIONS.md](docs/DECISIONS.md); a static ledger page with no build | `npx allowance ledger`, [ledger/](ledger/) |
 | Impact | an agent that pays for APIs, data or other agents with bounded loss: the prompt-injection attack in [docs/attack-log.md](docs/attack-log.md) moves no money; stablecoin prices; income, revenue split and vault-to-vault payments for agent businesses; ~0.003 NEAR of storage per vault through the factory | `make demo` (steps 4-6), [demo video](docs/media/demo.mp4) |
 | Originality | none of the building blocks is new (method-scoped keys, session keys, allowance modules, policy engines, x402); the combination is: a policy enforced on-chain with a free pre-check, receipts a seller verifies in one RPC view, keyless counterparty risk, a kill switch at protocol level, and a factory, on an agent that is only a key on the vault | [Prior art, and what is new here](#prior-art-and-what-is-new-here) |
@@ -333,6 +337,60 @@ as untrusted data, a guardrail enforces one counteroffer below the asking
 price, and any error falls back to the scripted planner. `--scenario ft` buys
 the token-priced dataset; `--risk off`, `--deny`, `--archival-rpc`,
 `--fastnear-tx` configure the counterparty check.
+
+## MCP server (`mcp/`): give Claude a budget, not a wallet
+
+`allowance-mcp` exposes the vault to any MCP client (Claude Desktop, Claude
+Code, an agent framework) over stdio, on the official
+[MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
+1.32.1. It holds only the agent's function-call key, so a model that is
+prompt-injected through a web page or a tool result can at worst spend inside
+the on-chain policy, and anything above the approval threshold waits for a
+human.
+
+| Tool | Signs? | What it does |
+|---|---|---|
+| `allowance_status` | no | policy in plain words, remaining budget, paused or not |
+| `allowance_check_payee` | no | counterparty check: deny-lists, account age, code changes, history in this vault -> allow / warn / block |
+| `allowance_simulate` | no | free `simulate` view: allow / needs_approval / block and why |
+| `allowance_pay` | yes, `pay` | counterparty check, then `simulate`, then `pay`; refuses **before signing** on block; returns the receipt id, or the approval request id |
+| `allowance_receipt`, `allowance_receipts` | no | read receipts (status, approval, delivery) |
+| `allowance_confirm_delivery` | yes, `confirm_delivery` | record whether the purchase was delivered |
+
+What it deliberately does not have: owner tools (approve, deny, set policy,
+kill, withdraw), a "force" option, or any way to read the key back. Those
+limits are in the code, not in the tool descriptions: `mcp/test/mcp.test.ts`
+connects a real MCP client and checks the tool list, the refusals and that
+nothing reaches the vault on a refused payment. `make demo` (step 7) runs it
+against the sandbox.
+
+Use it from Claude Desktop or Claude Code (`claude mcp add`), with the key
+injected by your password manager into the environment:
+
+```json
+{ "mcpServers": { "allowance": {
+    "command": "node",
+    "args": ["/path/to/allowance/mcp/bin/allowance-mcp.ts", "--vault", "vault.you.testnet", "--rpc", "https://test.rpc.fastnear.com"],
+    "env": { "ALLOWANCE_AGENT_KEY": "ed25519:..." } } } }
+```
+
+Do X, see Y, without Claude: `make demo-keep`, then in another terminal
+
+```sh
+set -a; . examples/local_demo/.tmp/demo.env; set +a
+KEY=examples/local_demo/.tmp/agent-key.json
+node mcp/bin/mcp-call.ts list -- --key-file $KEY                                    # seven tools, none of them owner tools
+node mcp/bin/mcp-call.ts allowance_status -- --key-file $KEY                        # policy and budget left
+node mcp/bin/mcp-call.ts allowance_pay '{"payee":"attacker.sandbox","amount":"1"}' -- --key-file $KEY --deny attacker.sandbox
+                                                                                    # REFUSED before signing, exit 3
+node mcp/bin/mcp-call.ts allowance_pay '{"payee":"api.sandbox","amount":"0.55"}' -- --key-file $KEY
+                                                                                    # WAITING FOR A HUMAN, approval request #N
+npx allowance receipts                                                                  # no receipt to the attacker beyond the demo's #6
+```
+
+`mcp-call` is a twenty-line MCP client that starts the server over stdio, as
+Claude Desktop does; the
+[MCP Inspector](https://github.com/modelcontextprotocol/inspector) works too.
 
 ## Counterparty-risk service (`risk/`)
 
@@ -691,6 +749,9 @@ Prompts from [near-hackathon-prompt-examples](https://github.com/nearai/near-hac
 * One counteroffer with reasoning: `X-Allowance-Offer` with
   `X-Allowance-Offer-Reason`, accepted or refused by the seller, guarded so
   it is only ever lower and only once.
+* MCP (the track's "NEAR MCP server" hint): `mcp/` lets any MCP client
+  spend from the vault with only the function-call key; no owner tools, and
+  a refused payment never reaches the chain.
 * Agent Market: researched (REST API and MCP exist, USD/USDC balances,
   marketplace escrow), not integrated.
 
@@ -712,9 +773,9 @@ Prompts from [near-hackathon-prompt-examples](https://github.com/nearai/near-hac
 |---|---|
 | `cargo test` | vault: 67 unit tests (policy core, NEP-141 flows, split, auto-disable, contract on a mocked VM with mocked promise results) + 10 sandbox tests (`tests/sandbox.rs`: function-call key flows, NEP-141 with a real token, revenue split and vault-to-vault payments, a leaked key disabled by the vault) + 1 factory sandbox test (`tests/factory.rs`) |
 | `cargo test --workspace` | the above + 5 factory unit tests (what `make test` and CI run) |
-| `npm test` | 133 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
+| `npm test` | 142 vitest tests: SDK, CLI, factory client, verifier and ledger against a mocked JSON-RPC node (real near-api-js signing, decoded transactions), the agent loop against the real demo API with an in-memory vault (NEAR, NEP-141, risk pre-check), the demo API's 402 rules, the risk service against an in-memory chain, the testnet configuration and dry run, the MCP server through a real MCP client (tool list without owner powers, refusals before signing, approval flow), and **one end-to-end run on neard-sandbox** (NEAR and NEP-141 purchases, injected payment blocked and rejected, owner methods refused by the protocol, kill -> `access_key_not_found`; then a vault created through the factory with `FactoryClient`, funded, given an agent key, paying, its receipt verified by global code hash). The end-to-end test skips itself, saying why, until `make build sandbox-node` has run. |
 | `npm run typecheck` | `tsc` strict over SDK, CLI, examples, demo API, risk service, testnet scripts, demo orchestrator and tests |
-| `make demo` | the whole story on a sandbox with eleven on-chain checks; non-zero exit if one fails |
+| `make demo` | the whole story on a sandbox with twelve on-chain checks; non-zero exit if one fails |
 
 Contract-only targets: `make build` (vault 390,385 bytes with the ABI
 embedded; factory 171,067; test token 154,819), `make size`, `make test-unit`
@@ -733,6 +794,7 @@ sdk/bin/allowance.ts CLI entry point (`npx allowance`)
 sdk/examples/        agent-loop.ts (feature 5), attack.ts (feature 7)
 sdk/test/            vitest: unit tests with a mocked RPC + e2e.sandbox.test.ts
 risk/                counterparty-risk service (`allowance-risk` CLI) and its tests
+mcp/                 MCP server (`allowance-mcp`, stdio): the agent tools for Claude and other MCP clients, and its tests
 demo-api/            paid HTTP API (402 + verify_receipt), tests
 ledger/              static ledger page: index.html, core.js (data), app.js (rendering)
 examples/local_demo/ run.ts (`make demo`), sandbox_node.rs (hosts neard-sandbox), .tmp/ (ignored, sandbox keys)
@@ -754,6 +816,11 @@ was built entirely after the announcement, and it contains no pre-existing
 code; the only code not written for this project is the public libraries
 listed under [Disclosure](#disclosure). Check it with
 `git log --reverse --format='%ad %s' --date=short | head -3`.
+
+The project was submitted on 2026-11-01 at the tag `hackathon-submission`
+(`ae2ff88`). Work after the tag is still inside the window (development ends
+2026-11-14T23:59Z) and is listed by `git log hackathon-submission..main`;
+the first addition is the MCP server (`mcp/`).
 
 ## Other submission by the same team
 

@@ -1,0 +1,23 @@
+{
+  "name": "@allowance/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server for Allowance: any MCP client (Claude Desktop, Claude Code, an agent framework) spends from a vault with only a function-call key; the vault's on-chain policy has the last word",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "allowance-mcp": "./bin/allowance-mcp.ts"
+  },
+  "dependencies": {
+    "@allowance/risk": "0.1.0",
+    "@allowance/sdk": "0.1.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.7"
+  }
+}

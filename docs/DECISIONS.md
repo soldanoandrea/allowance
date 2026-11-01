@@ -460,3 +460,21 @@ design says.
     the demo's "=== N." step headers, whose numbers did not match the
     captions. Result: 1:58, a 2.2 MB MP4 and a 2.5 MB GIF; checked by OCR on
     a frame every 2 s (no line ends in `~`) and by eye on sampled frames.
+
+80. **An MCP server holds only the agent key, and has no owner tools and no
+    force (2026-11-01).** MCP is how Claude Desktop, Claude Code and most
+    agent frameworks call tools, so it is the shortest path from "an LLM
+    with a budget" to a running agent. The server (`mcp/`) wraps the same
+    `guardedPay` the CLI uses, plus the counterparty check, and refuses to
+    sign on `block`; the CLI's `--force` (useful to show the on-chain
+    rejection) is not offered, because a model should never be able to
+    turn a refusal into a signed transaction. Approve, deny, policy, kill
+    and withdraw are owner powers and stay outside the server: even a
+    prompt-injected model with every tool can only spend inside the policy,
+    and above the approval threshold it can only ask. A `warn` from the
+    counterparty check does not stop the payment (as in the agent loop): it
+    is written into the receipt memo, and the approval threshold is the
+    human gate. We used the official MCP TypeScript SDK (1.32.1, pinned)
+    rather than a hand-written JSON-RPC loop, so any MCP client works with
+    it unchanged; it adds about 90 packages to `npm ci`, a cost we accept
+    for interoperability.

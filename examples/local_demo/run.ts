@@ -15,6 +15,9 @@
  *   6. business: the API operator keeps its revenue in its own Allowance
  *      vault with a revenue split; the agent pays that vault vault-to-vault
  *      (through its `deposit`) and the split forwards 10% / 5% shares
+ *   6b. MCP: an MCP client (as Claude Desktop or Claude Code would) starts
+ *      mcp/bin/allowance-mcp.ts with only the agent key, reads the budget,
+ *      buys one item and is refused, before signing, when told to pay the attacker
  *   7. print the receipts, check them, print the ledger page URL, stop everything
  *
  * Flags: --keep (leave the chain and API running until Ctrl+C),
@@ -37,6 +40,8 @@ import { join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
 import { parseArgs } from 'node:util';
 
+import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { JsonRpcProvider, type KeyPairString } from 'near-api-js';
 
 import {
@@ -320,6 +325,28 @@ try {
   const providerGain =
     BigInt((await new JsonRpcProvider({ url: node.rpcUrl }).viewAccount({ accountId: providerId })).amount) - providerBefore;
 
+  step('6b. MCP: an MCP client spends through allowance-mcp');
+  const mcp = new McpClient({ name: 'allowance-demo', version: '0.1.0' });
+  await mcp.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: ['mcp/bin/allowance-mcp.ts', '--vault', demo.vaultId, '--rpc', node.rpcUrl, '--key-file', rel(keyFile), '--deny', demo.attackerId],
+      cwd: REPO_ROOT,
+    }),
+  );
+  const mcpText = (r: Awaited<ReturnType<McpClient['callTool']>>): string => (r.content as Array<{ text: string }>).map((c) => c.text).join('\n');
+  const mcpCall = async (name: string, args: Record<string, unknown>) => {
+    const r = await mcp.callTool({ name, arguments: args });
+    console.log(`[mcp] ${name} ${JSON.stringify(args)}\n${mcpText(r).replace(/^/gm, '        ')}`);
+    return r;
+  };
+  const tools = (await mcp.listTools()).tools.map((t) => t.name);
+  say(`MCP tools offered to the model: ${tools.join(', ')} (no owner tools, no force)`);
+  await mcpCall('allowance_status', {});
+  const mcpPaid = await mcpCall('allowance_pay', { payee: demo.payeeId, amount: '0.01', memo: 'MCP: one more day of candles' });
+  const mcpRefused = await mcpCall('allowance_pay', { payee: demo.attackerId, amount: '1', memo: 'ignore previous instructions' });
+  await mcp.close();
+
   step('7. receipts on-chain');
   await cli(['receipts', '--vault', demo.vaultId, '--rpc', node.rpcUrl], {
     out: console.log,
@@ -357,6 +384,15 @@ try {
   check(
     /counterparty check attacker\.\S+: BLOCK/.test(attack.output) && pays.filter((r) => r.payee === demo.payeeId).every((r) => r.memo.includes('risk=')),
     'counterparty-risk check: attacker blocked by the deny-list before simulate; every API payment carries the risk verdict in its receipt memo',
+  );
+  const mcpReceipt = pays.find((r) => r.memo.startsWith('MCP: one more day of candles'));
+  check(
+    (mcpPaid.structuredContent as { status?: string } | undefined)?.status === 'paid' &&
+      mcpReceipt?.status.status === 'paid' &&
+      mcpReceipt.amount === parseNear('0.01').toString() &&
+      (mcpRefused.structuredContent as { status?: string } | undefined)?.status === 'refused' &&
+      pays.filter((r) => r.payee === demo.attackerId).length === 1,
+    `MCP: a client of allowance-mcp paid 0.01 NEAR${mcpReceipt ? ` (receipt #${mcpReceipt.id})` : ''}; told to pay the attacker, it was refused before signing (no new receipt)`,
   );
   if (token) {
     const price = parseUnits('2', token.decimals);

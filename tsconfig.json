@@ -32,6 +32,9 @@
     "risk/src/**/*.ts",
     "risk/bin/**/*.ts",
     "risk/test/**/*.ts",
+    "mcp/src/**/*.ts",
+    "mcp/bin/**/*.ts",
+    "mcp/test/**/*.ts",
     "examples/local_demo/**/*.ts",
     "scripts/**/*.ts",
     "vitest.config.ts"
