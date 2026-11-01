@@ -8,15 +8,48 @@ comes from it.
 What the scripts do and do not do:
 
 * `scripts/testnet/demo.ts` (`make demo-testnet`) deploys the vault on an
-  account **you** created, initialises it, deposits, registers the agent key
+  account **you** created (or, with `TESTNET_CREATE_ACCOUNTS=1`, on a
+  sub-account your owner account creates), initialises it, deposits, registers the agent key
   and runs the agent loop against a local copy of the paid demo API.
-* It **never creates accounts and never writes keys**. Keys are read from
+* It **never writes keys**, and creates accounts only with
+  `TESTNET_CREATE_ACCOUNTS=1` (sub-accounts of your owner account). Keys are read from
   an environment variable (best: injected by your password manager) or from
   a key file you created.
 * It is a **dry run unless `TESTNET_CONFIRM=yes`** (or `--yes`): by default
   it prints the plan and signs nothing.
 * It refuses `mainnet` RPC endpoints and any account that is not
   `*.testnet`.
+
+## Shortest path: one account
+
+With `TESTNET_CREATE_ACCOUNTS=1` you create **only the owner account** (any
+wallet, e.g. https://testnet.mynearwallet.com, about 10 testnet NEAR from the
+faucet) and keep its key in your password manager. The script then:
+
+* creates `vault.<owner>` (5 NEAR), `api.<owner>` and `attacker.<owner>`
+  (0.2 NEAR each) as sub-accounts carrying **the owner's public key**, so no
+  new secret exists;
+* generates the agent key in memory for this run (never written; the
+  function-call key stays on the vault, and the owner can remove it or `kill`);
+* deploys, funds 2 NEAR, registers the agent, runs the agent loop against the
+  paid API, then the prompt-injection attack against `attacker.<owner>`.
+
+```sh
+# .env.testnet (git-ignored): the key is a 1Password reference, resolved by `op run` at run time
+TESTNET_CREATE_ACCOUNTS=1
+TESTNET_OWNER_ID=you.testnet
+TESTNET_OWNER_KEY=op://<vault>/Allowance testnet owner/private key
+TESTNET_AUTO_APPROVE=1
+
+op run --env-file=.env.testnet -- make demo-testnet                       # dry run: prints the plan
+op run --env-file=.env.testnet -- env TESTNET_CONFIRM=yes make demo-testnet
+```
+
+The same run was rehearsed on a local `neard-sandbox` (a local RPC URL lifts
+the `*.testnet` rule): accounts created, contract deployed, three purchases
+(one counteroffer, one approval), the attack rejected on-chain with the
+attacker's balance unchanged. The sections below are the longer path with
+accounts and keys you create yourself.
 
 ## 0. Prerequisites
 

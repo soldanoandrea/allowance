@@ -1,6 +1,10 @@
 /**
- * Configuration of the testnet demo, from environment variables only. Every
- * account must already exist (the scripts never create accounts). Each key
+ * Configuration of the testnet demo, from environment variables only. By
+ * default every account must already exist. With TESTNET_CREATE_ACCOUNTS=1
+ * the human creates only the owner account: the owner creates the vault, the
+ * payee and the attacker as its own sub-accounts, each with the owner's
+ * public key (no new secret), and the agent key is generated in memory for
+ * the run and never written. Each key
  * comes either from an environment variable (`TESTNET_OWNER_KEY`, ...;
  * e.g. injected by a password manager's CLI so it never touches the disk)
  * or from a key file the human created (`TESTNET_OWNER_KEY_FILE`, ...).
@@ -16,11 +20,17 @@ export interface TestnetConfig {
   /** null: the key is in $TESTNET_OWNER_KEY. */
   ownerKeyFile: string | null;
   vaultId: string;
-  /** Full-access key of the vault account: only used to deploy the code. null: $TESTNET_VAULT_KEY. */
+  /** Full-access key of the vault account: only used to deploy the code. null: $TESTNET_VAULT_KEY (or the owner's key with createAccounts). */
   vaultKeyFile: string | null;
   payeeId: string;
-  /** null: $TESTNET_AGENT_KEY. */
+  /** null: $TESTNET_AGENT_KEY, or a key generated in memory with createAccounts and no agent key set. */
   agentKeyFile: string | null;
+  /** The owner creates vault, payee and attacker as sub-accounts carrying the owner's public key (TESTNET_CREATE_ACCOUNTS=1). */
+  createAccounts: boolean;
+  /** No agent key configured: generate one in memory for this run. */
+  ephemeralAgent: boolean;
+  /** Account named by the poisoned page of the attack step (null: no attack step). */
+  attackerId: string | null;
   approverId: string | null;
   depositNear: string;
   policy: { perTxCap: string; budget: string; period: string; approvalThreshold: string };
@@ -42,18 +52,20 @@ export function readConfig(env: Record<string, string | undefined>, argv: string
     if (!v) problems.push(`${name} is not set`);
     return v ?? '';
   };
+  // A local node (neard-sandbox) is a throw-away chain whose accounts are not *.testnet: used to rehearse the run.
+  const local = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(env['TESTNET_RPC_URL']?.trim() ?? '');
   const account = (name: string, optional = false): string => {
     const v = optional ? (env[name]?.trim() ?? '') : need(name);
     if (v && !isAccountId(v)) problems.push(`${name}=${v} is not a NEAR account id`);
-    else if (v && !v.endsWith('.testnet')) problems.push(`${name}=${v}: only *.testnet accounts are accepted by these scripts`);
+    else if (v && !local && !v.endsWith('.testnet')) problems.push(`${name}=${v}: only *.testnet accounts are accepted by these scripts`);
     return v;
   };
-  /** `<base>` (the key itself, from the environment) or `<base>_FILE` (a path). */
-  const key = (base: string): string | null => {
+  /** `<base>` (the key itself, from the environment) or `<base>_FILE` (a path); `optional`: neither is fine. */
+  const key = (base: string, optional = false): string | null => {
     if (env[base]?.trim()) return null;
     const v = env[`${base}_FILE`]?.trim();
     if (!v) {
-      problems.push(`${base} or ${base}_FILE is not set`);
+      if (!optional) problems.push(`${base} or ${base}_FILE is not set`);
       return null;
     }
     if (!existsSync(v)) problems.push(`${base}_FILE=${v}: file not found`);
@@ -77,9 +89,23 @@ export function readConfig(env: Record<string, string | undefined>, argv: string
   const archival = env['TESTNET_ARCHIVAL_RPC_URL']?.trim() || null;
   if (archival && /mainnet/i.test(archival)) problems.push('TESTNET_ARCHIVAL_RPC_URL is a mainnet endpoint: refused');
 
+  const createAccounts = env['TESTNET_CREATE_ACCOUNTS'] === '1';
   const ownerId = account('TESTNET_OWNER_ID');
+  if (createAccounts && ownerId) {
+    // Defaults: sub-accounts of the owner.
+    env = { ...env };
+    for (const [name, label] of [['TESTNET_VAULT_ID', 'vault'], ['TESTNET_PAYEE_ID', 'api'], ['TESTNET_ATTACKER_ID', 'attacker']] as const) {
+      if (!env[name]?.trim()) env[name] = `${label}.${ownerId}`;
+    }
+  }
   const vaultId = account('TESTNET_VAULT_ID');
   const payeeId = account('TESTNET_PAYEE_ID');
+  const attackerId = account('TESTNET_ATTACKER_ID', true) || null;
+  if (createAccounts) {
+    for (const [name, id] of [['TESTNET_VAULT_ID', vaultId], ['TESTNET_PAYEE_ID', payeeId], ['TESTNET_ATTACKER_ID', attackerId]] as const) {
+      if (id && ownerId && !id.endsWith(`.${ownerId}`)) problems.push(`${name}=${id}: with TESTNET_CREATE_ACCOUNTS=1 it must be a sub-account of ${ownerId}`);
+    }
+  }
   const approverId = account('TESTNET_APPROVER_ID', true) || null;
   if (vaultId && ownerId && vaultId === ownerId) problems.push('TESTNET_VAULT_ID must be a separate account from TESTNET_OWNER_ID');
   if (vaultId && payeeId && vaultId === payeeId) problems.push('TESTNET_PAYEE_ID must differ from the vault');
@@ -89,9 +115,12 @@ export function readConfig(env: Record<string, string | undefined>, argv: string
     ownerId,
     ownerKeyFile: key('TESTNET_OWNER_KEY'),
     vaultId,
-    vaultKeyFile: key('TESTNET_VAULT_KEY'),
+    vaultKeyFile: key('TESTNET_VAULT_KEY', createAccounts),
     payeeId,
-    agentKeyFile: key('TESTNET_AGENT_KEY'),
+    agentKeyFile: key('TESTNET_AGENT_KEY', createAccounts),
+    createAccounts,
+    ephemeralAgent: createAccounts && !env['TESTNET_AGENT_KEY']?.trim() && !env['TESTNET_AGENT_KEY_FILE']?.trim(),
+    attackerId,
     approverId,
     depositNear: amount('TESTNET_DEPOSIT_NEAR', '2'),
     policy: {

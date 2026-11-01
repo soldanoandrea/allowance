@@ -53,6 +53,23 @@ describe('testnet demo configuration (nothing is sent)', () => {
     expect(readConfig({ ...valid(), TESTNET_APPROVAL_THRESHOLD: '1' }).problems.join()).toMatch(/below TESTNET_PER_TX_CAP/);
   });
 
+  it('TESTNET_CREATE_ACCOUNTS=1: one owner account and its key are enough', () => {
+    const { config, problems } = readConfig({ TESTNET_CREATE_ACCOUNTS: '1', TESTNET_OWNER_ID: 'you.testnet', TESTNET_OWNER_KEY: 'ed25519:injected' });
+    expect(problems).toEqual([]);
+    expect(config).toMatchObject({
+      vaultId: 'vault.you.testnet',
+      payeeId: 'api.you.testnet',
+      attackerId: 'attacker.you.testnet',
+      vaultKeyFile: null,
+      agentKeyFile: null,
+      createAccounts: true,
+      ephemeralAgent: true,
+    });
+    const elsewhere = readConfig({ TESTNET_CREATE_ACCOUNTS: '1', TESTNET_OWNER_ID: 'you.testnet', TESTNET_OWNER_KEY: 'ed25519:x', TESTNET_PAYEE_ID: 'api.other.testnet' });
+    expect(elsewhere.problems.join()).toMatch(/must be a sub-account of you\.testnet/);
+    expect(readConfig(valid()).config).toMatchObject({ createAccounts: false, ephemeralAgent: false, attackerId: null });
+  });
+
   it('the script stops after printing the plan unless confirmed', () => {
     const out = execFileSync(process.execPath, [join(REPO_ROOT, 'scripts', 'testnet', 'demo.ts'), 'all'], {
       // An unroutable RPC: any network access in dry-run mode would fail the run.
@@ -61,5 +78,12 @@ describe('testnet demo configuration (nothing is sent)', () => {
     });
     expect(out).toContain('vault vault.you.testnet');
     expect(out).toContain('dry run: nothing was sent');
+    const one = execFileSync(process.execPath, [join(REPO_ROOT, 'scripts', 'testnet', 'demo.ts'), 'all'], {
+      env: { ...process.env, TESTNET_CREATE_ACCOUNTS: '1', TESTNET_OWNER_ID: 'you.testnet', TESTNET_OWNER_KEY: 'ed25519:placeholder', TESTNET_RPC_URL: 'http://127.0.0.1:9/testnet', TESTNET_CONFIRM: '' },
+      encoding: 'utf8',
+    });
+    expect(one).toContain('you.testnet creates vault.you.testnet, api.you.testnet, attacker.you.testnet if missing');
+    expect(one).toContain('agent key from memory (generated for this run)');
+    expect(one).toContain('dry run: nothing was sent');
   });
 });

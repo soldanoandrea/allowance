@@ -132,7 +132,8 @@ and written only to `examples/local_demo/.tmp/` (git-ignored, mode 600)
 because the agents run as their own processes; `make demo-keep` and
 `make demo-manual` also write the owner's sandbox key there
 (`owner-key.json`) for the CLI. Nothing touches testnet or
-mainnet. The same story on testnet, with your own accounts, is prepared in
+mainnet. The same story on testnet needs one owner account (the script creates
+the vault, the payee and the attacker as its sub-accounts) and is in
 [docs/TESTNET.md](docs/TESTNET.md) (`make demo-testnet`, a dry run unless you
 confirm).
 
