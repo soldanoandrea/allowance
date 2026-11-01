@@ -32,6 +32,8 @@ editing): [docs/media/demo.mp4](docs/media/demo.mp4). Regenerate it with
 `make video` ([docs/demo.tape](docs/demo.tape), scene by scene from
 [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md)).
 
+**Without installing anything**: the [hosted ledger page](https://soldanoandrea.github.io/allowance/) shows a recorded demo vault (receipts, the rejected attack, the split).
+
 **Judging in five minutes**: run `make demo` (expect twelve `ok` checks and
 `demo OK`), then [try the attack yourself](#try-the-attack-yourself);
 read the real attack transcript in [docs/attack-log.md](docs/attack-log.md);
@@ -431,6 +433,13 @@ accounts for (symbols read from each token's `ft_metadata`), the revenue
 split, each agent with its policy and budget meter, pending approvals (with
 the CLI command to approve), receipts (with their split shares) and recent
 NEP-297 events. Optional `interval=`, `scan=`, `from=`.
+
+**Open it now, nothing to install:** https://soldanoandrea.github.io/allowance/
+shows the vault of one `make demo` run (`ledger/recording.json`: the same
+views and NEP-297 events the page reads from a live node, saved by `make
+ledger-recording`), labelled as a recording; nine receipts, the rejected
+attack, the revenue split and the MCP payment are all there. With `?rpc=` and
+`&vault=` it reads a live vault instead.
 
 **Hosted on GitHub Pages.** `.github/workflows/pages.yml` publishes `ledger/`
 on every push to `main` (enable it once: Settings -> Pages -> Source: GitHub

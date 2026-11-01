@@ -5,6 +5,9 @@
  *   interval=<s>     polling interval, default 3
  *   scan=<blocks>    how far back to look for events on first load, default 300
  *   from=<height>    scan events from this block height instead
+ * Without rpc and vault, the page shows recording.json if it is there: the
+ * vault of a `make demo` run on a local sandbox, saved by `make ledger-recording`
+ * (a static copy, clearly labelled, so the hosted page has something to show).
  * All text is inserted with textContent (memos and labels are agent-controlled).
  */
 (function () {
@@ -206,8 +209,31 @@
     if (!paused) timer = setTimeout(poll, intervalMs);
   }
 
-  if (!rpcUrl || !vaultId) {
+  function renderRecording(rec) {
+    L.setTokens(rec.snapshot.tokens);
+    scanState = { events: rec.events, firstHeight: rec.firstHeight, head: rec.head };
+    document.getElementById('vault-name').textContent = rec.vaultId + ' (recorded)';
+    document.getElementById('toggle').hidden = true;
+    setStatus('recording of ' + rec.recordedAt.slice(0, 10) + ', not live', 'stale');
+    var banner = section('Recorded demo, not a live vault', [
+      h('p', null, [
+        'This is the vault of one ', h('code', { text: 'make demo' }), ' run on a throw-away local NEAR sandbox (' + rec.recordedAt + ', commit ' + rec.commit +
+        '), saved with the same RPC reads this page makes against a live node. The sandbox no longer exists. Run ',
+        h('code', { text: 'make demo-keep' }), ' to see the same page live, or open a vault below.',
+      ]),
+    ]);
+    app.replaceChildren(banner, renderStats(rec.snapshot), renderAgents(rec.snapshot), renderPending(rec.snapshot), renderReceipts(rec.snapshot), renderEvents());
     renderSetup();
+    document.getElementById('status').textContent = 'recording of ' + rec.recordedAt.slice(0, 10) + ', not live';
+    document.getElementById('footer').textContent =
+      'Recorded from make demo: view methods of ' + rec.vaultId + ' and NEP-297 events of blocks ' + rec.firstHeight + '-' + rec.head + ' on a local neard-sandbox.';
+  }
+
+  if (!rpcUrl || !vaultId) {
+    fetch('recording.json').then(function (res) {
+      if (!res.ok) throw new Error('no recording');
+      return res.json();
+    }).then(renderRecording, function () { renderSetup(); });
     return;
   }
   document.getElementById('vault-name').textContent = vaultId;

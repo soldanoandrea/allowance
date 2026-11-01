@@ -22,6 +22,8 @@
  *
  * Flags: --keep (leave the chain and API running until Ctrl+C),
  *        --update-docs (write the attack transcript to docs/attack-log.md),
+ *        --record-ledger (save what the ledger page reads to ledger/recording.json,
+ *        which the hosted page shows when it is opened without a vault),
  *        --planner scripted|llm,
  *        --no-ft (skip the NEP-141 scenario),
  *        --manual-approve (you approve the waiting payment with the CLI
@@ -34,10 +36,11 @@
  * written to examples/local_demo/.tmp/agent-key.json (git-ignored, mode 600)
  * because the agent runs as a separate process, like a real one would.
  */
-import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { createInterface } from 'node:readline';
+import { runInNewContext } from 'node:vm';
 import { parseArgs } from 'node:util';
 
 import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
@@ -76,6 +79,7 @@ const { values } = parseArgs({
   options: {
     keep: { type: 'boolean', default: false },
     'update-docs': { type: 'boolean', default: false },
+    'record-ledger': { type: 'boolean', default: false },
     planner: { type: 'string', default: 'scripted' },
     'no-ft': { type: 'boolean', default: false },
     'manual-approve': { type: 'boolean', default: false },
@@ -101,6 +105,29 @@ async function shutdown(): Promise<void> {
   while (cleanups.length) await cleanups.pop()!().catch(() => {});
 }
 process.on('SIGINT', () => void shutdown().then(() => process.exit(130)));
+
+/**
+ * What ledger/core.js reads from the vault (views and NEP-297 events), read
+ * with ledger/core.js itself, so the hosted page renders a recording with the
+ * same code as a live vault.
+ */
+async function recordLedger(rpcUrl: string, vaultId: string, fromHeight: number) {
+  const ctx: Record<string, unknown> = { fetch, TextEncoder, TextDecoder, btoa, atob };
+  runInNewContext(readFileSync(join(REPO_ROOT, 'ledger', 'core.js'), 'utf8'), ctx);
+  const L = ctx['AllowanceLedger'] as {
+    loadSnapshot(url: string, vault: string): Promise<{ receipts: unknown[] }>;
+    scanEvents(url: string, vault: string, state: Record<string, unknown>, opts: Record<string, unknown>): Promise<{ events: unknown[]; firstHeight: number; head: number }>;
+  };
+  const snapshot = await L.loadSnapshot(rpcUrl, vaultId);
+  const state = await L.scanEvents(rpcUrl, vaultId, { nextHeight: fromHeight, events: [], seenTx: {} }, { maxBlocksPerPoll: 5000 });
+  let commit = 'unknown';
+  try {
+    commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+  } catch {
+    /* not a git checkout */
+  }
+  return { recordedAt: new Date().toISOString().slice(0, 19) + 'Z', commit, vaultId, snapshot, events: state.events, firstHeight: state.firstHeight, head: state.head };
+}
 
 /** Run a node script as a separate process, stream its output, keep a copy. */
 function runNode(script: string, args: string[]): Promise<{ code: number; output: string }> {
@@ -410,6 +437,11 @@ try {
   url.searchParams.set('vault', demo.vaultId);
   url.searchParams.set('from', String(startHeight));
   console.log(`ledger page: ${url.toString()}`);
+  if (values['record-ledger']) {
+    const recording = await recordLedger(node.rpcUrl, demo.vaultId, startHeight);
+    writeFileSync(join(REPO_ROOT, 'ledger', 'recording.json'), `${JSON.stringify(recording)}\n`);
+    say(`ledger recording written to ledger/recording.json (${recording.snapshot.receipts.length} receipts, ${recording.events.length} events)`);
+  }
   console.log(values.keep ? '(open it now: the sandbox keeps running)' : '(the sandbox stops now; run `make demo-keep` to browse it live)');
   console.log(`\n${failures === 0 ? 'demo OK' : `demo FAILED (${failures} check(s))`}`);
 

@@ -1,4 +1,4 @@
-.PHONY: build test test-unit test-sandbox fmt fmt-check clippy clean size \
+.PHONY: ledger-recording build test test-unit test-sandbox fmt fmt-check clippy clean size \
         sandbox-node node-check demo demo-keep attack-log test-ts typecheck check \
         demo-testnet demo-manual video
 
@@ -93,6 +93,10 @@ video: node-check
 # Re-run the demo and refresh docs/attack-log.md with the real output.
 attack-log: node-check build sandbox-node node_modules
 	node examples/local_demo/run.ts --update-docs
+
+# Refresh ledger/recording.json: the demo vault the hosted ledger page shows when opened without a vault.
+ledger-recording: node-check build sandbox-node node_modules
+	node examples/local_demo/run.ts --record-ledger
 
 typecheck: node-check node_modules
 	npm run typecheck
